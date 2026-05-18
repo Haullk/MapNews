@@ -1,0 +1,1 @@
+"""MapNews background worker package."""

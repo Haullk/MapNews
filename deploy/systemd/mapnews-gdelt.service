@@ -1,0 +1,11 @@
+[Unit]
+Description=Import GDELT Events for MapNews
+After=network.target postgresql.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/mapnews/app
+EnvironmentFile=/opt/mapnews/app/.env
+ExecStart=/opt/mapnews/app/.venv/bin/python -m worker.gdelt_importer
+User=mapnews
+Group=mapnews

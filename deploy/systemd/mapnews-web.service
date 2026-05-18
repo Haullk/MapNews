@@ -1,0 +1,16 @@
+[Unit]
+Description=MapNews Next.js web
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/mapnews/app
+EnvironmentFile=/opt/mapnews/app/.env
+ExecStart=/usr/bin/npm run start
+Restart=always
+RestartSec=5
+User=mapnews
+Group=mapnews
+
+[Install]
+WantedBy=multi-user.target

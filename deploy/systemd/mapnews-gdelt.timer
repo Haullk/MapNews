@@ -1,0 +1,10 @@
+[Unit]
+Description=Run MapNews GDELT importer daily
+
+[Timer]
+OnCalendar=*-*-* 03:20:00
+Persistent=true
+Unit=mapnews-gdelt.service
+
+[Install]
+WantedBy=timers.target
