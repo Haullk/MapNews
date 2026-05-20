@@ -3,11 +3,12 @@ from __future__ import annotations
 import argparse
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
-from datetime import date, datetime
-from typing import Any, TypedDict
+from datetime import UTC, date, datetime, timedelta
+from typing import TypedDict
 
 from psycopg import Connection
 from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
 
 from worker.channels import channel_for_event_code
 from worker.db import connect, load_environment
@@ -306,11 +307,18 @@ def upsert_clean_mention(conn: Connection, mention: CleanMention) -> None:
 
 
 def process_day(conn: Connection, day: date) -> dict[str, int]:
+    start_at = datetime(day.year, day.month, day.day, tzinfo=UTC)
+    end_at = start_at + timedelta(days=1)
     with conn.cursor(row_factory=dict_row) as cur:
-        cur.execute("select global_event_id, import_batch_id, raw_row from gdelt_events_raw")
+        cur.execute(
+            """
+            select global_event_id, import_batch_id, raw_row
+            from gdelt_events_raw
+            where source_file_timestamp >= %s and source_file_timestamp < %s
+            """,
+            (start_at, end_at),
+        )
         raw_events = cur.fetchall()
-        cur.execute("select raw_id, raw_row from gdelt_mentions_raw")
-        raw_mentions = cur.fetchall()
         cur.execute(
             """
             insert into gdelt_gkg_preserved (
@@ -318,8 +326,10 @@ def process_day(conn: Connection, day: date) -> dict[str, int]:
             )
             select raw_id, document_identifier, source_file, source_file_timestamp, raw_row
             from gdelt_gkg_raw
+            where source_file_timestamp >= %s and source_file_timestamp < %s
             on conflict (raw_id) do nothing
-            """
+            """,
+            (start_at, end_at),
         )
 
     events: list[CleanEvent] = []
@@ -330,11 +340,26 @@ def process_day(conn: Connection, day: date) -> dict[str, int]:
             events.append(event)
 
     mentions_by_event: dict[int, list[CleanMention]] = defaultdict(list)
-    for raw in raw_mentions:
-        mention = clean_mention_from_raw(raw["raw_id"], raw["raw_row"])
-        if mention:
-            upsert_clean_mention(conn, mention)
-            mentions_by_event[mention.global_event_id].append(mention)
+    event_ids = [event.global_event_id for event in events]
+    if event_ids:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """
+                select raw_id, raw_row
+                from gdelt_mentions_raw
+                where source_file_timestamp >= %s
+                  and source_file_timestamp < %s
+                  and global_event_id = any(%s)
+                """,
+                (start_at, end_at, event_ids),
+            )
+            raw_mentions = cur.fetchall()
+
+        for raw in raw_mentions:
+            mention = clean_mention_from_raw(raw["raw_id"], raw["raw_row"])
+            if mention:
+                upsert_clean_mention(conn, mention)
+                mentions_by_event[mention.global_event_id].append(mention)
 
     with conn.cursor() as cur:
         cur.execute("delete from map_hotspots where data_date = %s", (day,))
@@ -352,7 +377,7 @@ def process_day(conn: Connection, day: date) -> dict[str, int]:
                 )
                 values (
                   %s, %s, %s, %s, %s, %s, %s, %s, ST_SetSRID(ST_MakePoint(%s, %s), 4326),
-                  %s, %s, %s, %s, %s, %s, %s, now()
+                  %s, %s, %s, %s, %s, %s, %s, %s
                 )
                 returning id
                 """,
@@ -374,6 +399,7 @@ def process_day(conn: Connection, day: date) -> dict[str, int]:
                     len(hotspot.source_domains),
                     hotspot.heat_score,
                     hotspot_summary(hotspot),
+                    end_at,
                 ),
             )
             inserted = cur.fetchone()
@@ -390,7 +416,7 @@ def process_day(conn: Connection, day: date) -> dict[str, int]:
                     (hotspot_id, url, domain_from_url(url), rank),
                 )
 
-    write_daily_brief(conn, day, hotspots)
+    write_daily_brief(conn, day, hotspots, end_at)
     with conn.cursor() as cur:
         cur.execute(
             "update gdelt_import_batches set processing_status = 'success' where import_date = %s",
@@ -399,7 +425,12 @@ def process_day(conn: Connection, day: date) -> dict[str, int]:
     return {"events_cleaned": len(events), "hotspots": len(hotspots)}
 
 
-def write_daily_brief(conn: Connection, day: date, hotspots: list[HotspotAggregate]) -> None:
+def write_daily_brief(
+    conn: Connection,
+    day: date,
+    hotspots: list[HotspotAggregate],
+    data_updated_at: datetime,
+) -> None:
     regions = Counter(item.region_name for item in hotspots)
     channels = Counter(item.channel for item in hotspots)
     top_regions: list[BriefCount] = [{"name": name, "count": count} for name, count in regions.most_common(5)]
@@ -416,24 +447,26 @@ def write_daily_brief(conn: Connection, day: date, hotspots: list[HotspotAggrega
         cur.execute(
             """
             insert into daily_briefs (
-              data_date, hotspot_count, top_regions, top_channels, completeness, brief_text
+              data_date, hotspot_count, top_regions, top_channels, completeness, brief_text, data_updated_at
             )
-            values (%s, %s, %s::jsonb, %s::jsonb, '{}'::jsonb, %s)
+            values (%s, %s, %s, %s, %s, %s, %s)
             on conflict (data_date) do update set
               hotspot_count = excluded.hotspot_count,
               top_regions = excluded.top_regions,
               top_channels = excluded.top_channels,
               brief_text = excluded.brief_text,
-              data_updated_at = now()
+              data_updated_at = excluded.data_updated_at
             """,
-            (day, len(hotspots), AnyJson(top_regions), AnyJson(top_channels), brief),
+            (
+                day,
+                len(hotspots),
+                Jsonb(top_regions),
+                Jsonb(top_channels),
+                Jsonb({}),
+                brief,
+                data_updated_at,
+            ),
         )
-
-
-def AnyJson(value: Any) -> str:
-    import json
-
-    return json.dumps(value, ensure_ascii=False)
 
 
 def parse_args() -> argparse.Namespace:

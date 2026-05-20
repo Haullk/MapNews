@@ -23,40 +23,7 @@ alter table gdelt_import_batches add column if not exists events_rows integer no
 alter table gdelt_import_batches add column if not exists mentions_rows integer not null default 0;
 alter table gdelt_import_batches add column if not exists gkg_rows integer not null default 0;
 
-create table if not exists gdelt_events (
-  global_event_id bigint primary key,
-  event_date date not null,
-  date_added timestamptz,
-  actor1_name text,
-  actor1_country_code text,
-  actor2_name text,
-  actor2_country_code text,
-  event_code text,
-  event_base_code text,
-  event_root_code text,
-  quad_class smallint,
-  goldstein_scale numeric,
-  num_mentions integer,
-  num_sources integer,
-  num_articles integer,
-  avg_tone numeric,
-  action_geo_type smallint,
-  action_geo_fullname text,
-  action_geo_country_code text,
-  action_geo_adm1_code text,
-  action_geo_lat double precision,
-  action_geo_long double precision,
-  action_geo_feature_id text,
-  source_url text,
-  geom geometry(Point, 4326),
-  imported_at timestamptz not null default now()
-);
-
-create index if not exists gdelt_events_event_date_idx on gdelt_events (event_date desc);
-create index if not exists gdelt_events_event_code_idx on gdelt_events (event_code);
-create index if not exists gdelt_events_action_country_idx on gdelt_events (action_geo_country_code);
-create index if not exists gdelt_events_num_articles_idx on gdelt_events (num_articles desc);
-create index if not exists gdelt_events_geom_idx on gdelt_events using gist (geom);
+drop table if exists gdelt_events cascade;
 
 create table if not exists gdelt_import_files (
   id bigserial primary key,
@@ -205,6 +172,9 @@ create table if not exists gdelt_gkg_preserved (
   preserved_at timestamptz not null default now()
 );
 
+comment on table gdelt_gkg_preserved is
+  'P1 only preserves GKG raw rows for future topic/entity/storyline work; it is intentionally not queried by the frontend.';
+
 create table if not exists map_hotspots (
   id bigserial primary key,
   hotspot_uid text not null unique,
@@ -285,8 +255,11 @@ create table if not exists access_audit_logs (
 
 create index if not exists gdelt_import_files_date_dataset_idx on gdelt_import_files (import_date desc, dataset, status);
 create index if not exists gdelt_events_raw_batch_idx on gdelt_events_raw (import_batch_id);
+create index if not exists gdelt_events_raw_file_timestamp_idx on gdelt_events_raw (source_file_timestamp);
 create index if not exists gdelt_mentions_raw_event_idx on gdelt_mentions_raw (global_event_id);
+create index if not exists gdelt_mentions_raw_file_timestamp_idx on gdelt_mentions_raw (source_file_timestamp);
 create index if not exists gdelt_gkg_raw_batch_idx on gdelt_gkg_raw (import_batch_id);
+create index if not exists gdelt_gkg_raw_file_timestamp_idx on gdelt_gkg_raw (source_file_timestamp);
 create index if not exists gdelt_events_clean_date_channel_idx on gdelt_events_clean (event_date desc, channel);
 create index if not exists gdelt_events_clean_region_idx on gdelt_events_clean (region_key);
 create index if not exists gdelt_events_clean_geom_idx on gdelt_events_clean using gist (geom);

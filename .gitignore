@@ -19,6 +19,7 @@ tsconfig.tsbuildinfo
 
 # Local workspace and planning docs
 .idea/
+project-docs/
 mapnews/
 background.md
 high-level-design.md

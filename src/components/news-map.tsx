@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { DataStatus, DailyBrief, HotspotDetail, HotspotRankingItem, MapHotspot } from "@/lib/hotspots";
+import type { DataStatus, DailyBrief, HotspotDetail, MapHotspot } from "@/lib/hotspots";
 
 interface NewsMapProps {
   mapKey: string;
@@ -19,14 +19,31 @@ interface Filters {
 }
 
 type HotspotsPayload = { hotspots: MapHotspot[]; status: { message: string; ok: boolean } };
+type LoadMode = "full" | "hotspots";
+
+const CHANNEL_COLORS: Record<string, string> = {
+  国际: "#0f8f7f",
+  冲突: "#bc3f32",
+  政治: "#4b6fb5",
+  经济: "#b98221",
+  灾害: "#7d4aa8",
+  社会: "#52606d",
+};
 
 export function NewsMap({ mapKey, mapSecurityCode, dates, channels, databaseReady, initialStatus }: NewsMapProps) {
   const mapEl = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<AMapMap | null>(null);
   const markersRef = useRef<AMapMarker[]>([]);
+  const abortRef = useRef<AbortController | null>(null);
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const requestIdRef = useRef(0);
+  const loadWorkspaceRef = useRef<(mode?: LoadMode) => void>(() => undefined);
+  const briefCacheRef = useRef<Map<string, DailyBrief>>(new Map());
+  const statusCacheRef = useRef<DataStatus | null>(initialStatus);
+  const previousFiltersRef = useRef<Filters | null>(null);
   const [mapReady, setMapReady] = useState(false);
   const [hotspots, setHotspots] = useState<MapHotspot[]>([]);
-  const [ranking, setRanking] = useState<HotspotRankingItem[]>([]);
+  const [ranking, setRanking] = useState<MapHotspot[]>([]);
   const [brief, setBrief] = useState<DailyBrief | null>(null);
   const [selected, setSelected] = useState<HotspotDetail | null>(null);
   const [status, setStatus] = useState<DataStatus>(initialStatus);
@@ -81,31 +98,85 @@ export function NewsMap({ mapKey, mapSecurityCode, dates, channels, databaseRead
     [filters],
   );
 
-  const loadWorkspace = useCallback(async () => {
+  const briefParams = useCallback(() => {
+    const params = new URLSearchParams();
+    if (filters.date) params.set("date", filters.date);
+    return params;
+  }, [filters.date]);
+
+  const loadWorkspace = useCallback(async (mode: LoadMode = "full") => {
     if (!databaseReady) return;
+    abortRef.current?.abort();
+    const requestId = requestIdRef.current + 1;
+    requestIdRef.current = requestId;
+    const controller = new AbortController();
+    abortRef.current = controller;
     setLoading(true);
     try {
-      const [hotspotResponse, rankingResponse, briefResponse, statusResponse] = await Promise.all([
-        fetch(`/api/hotspots?${queryParams(Boolean(mapRef.current)).toString()}`, { cache: "no-store" }),
-        fetch(`/api/hotspot-ranking?${queryParams(false).toString()}`, { cache: "no-store" }),
-        fetch(`/api/daily-brief?${queryParams(false).toString()}`, { cache: "no-store" }),
-        fetch("/api/data-status", { cache: "no-store" }),
-      ]);
+      const hotspotResponse = await fetch(`/api/hotspots?${queryParams(Boolean(mapRef.current)).toString()}`, {
+        cache: "no-store",
+        signal: controller.signal,
+      });
       const hotspotPayload = (await hotspotResponse.json()) as HotspotsPayload;
-      const rankingPayload = (await rankingResponse.json()) as { items: HotspotRankingItem[] };
-      const briefPayload = (await briefResponse.json()) as { brief: DailyBrief };
-      const statusPayload = (await statusResponse.json()) as { status: DataStatus };
+      if (requestId !== requestIdRef.current) return;
+      if (!hotspotResponse.ok) {
+        throw new Error(hotspotPayload.status.message);
+      }
       setHotspots(hotspotPayload.hotspots);
-      setRanking(rankingPayload.items);
+      setRanking(hotspotPayload.hotspots.slice(0, 20));
+      setMessage(hotspotPayload.status.message);
+
+      if (mode === "hotspots") return;
+
+      const briefKey = filters.date || "__default__";
+      const cachedBrief = briefCacheRef.current.get(briefKey);
+      const cachedStatus = statusCacheRef.current;
+      if (cachedBrief && cachedStatus) {
+        setBrief(cachedBrief);
+        setStatus(cachedStatus);
+        return;
+      }
+
+      const briefRequest = cachedBrief
+        ? Promise.resolve<{ brief: DailyBrief }>({ brief: cachedBrief })
+        : fetch(`/api/daily-brief?${briefParams().toString()}`, {
+            cache: "no-store",
+            signal: controller.signal,
+          }).then((response) => response.json() as Promise<{ brief: DailyBrief }>);
+      const statusRequest = cachedStatus
+        ? Promise.resolve<{ status: DataStatus }>({ status: cachedStatus })
+        : fetch("/api/data-status", {
+            cache: "no-store",
+            signal: controller.signal,
+          }).then((response) => response.json() as Promise<{ status: DataStatus }>);
+      const [briefPayload, statusPayload] = await Promise.all([briefRequest, statusRequest]);
+      if (requestId !== requestIdRef.current) return;
+      briefCacheRef.current.set(briefKey, briefPayload.brief);
+      statusCacheRef.current = statusPayload.status;
       setBrief(briefPayload.brief);
       setStatus(statusPayload.status);
-      setMessage(hotspotPayload.status.message);
     } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") return;
       setMessage(error instanceof Error ? error.message : "热点数据加载失败");
     } finally {
-      setLoading(false);
+      if (requestId === requestIdRef.current) {
+        setLoading(false);
+      }
     }
-  }, [databaseReady, queryParams]);
+  }, [briefParams, databaseReady, filters.date, queryParams]);
+
+  useEffect(() => {
+    loadWorkspaceRef.current = loadWorkspace;
+  }, [loadWorkspace]);
+
+  const scheduleHotspotLoad = useCallback(() => {
+    if (debounceRef.current) {
+      clearTimeout(debounceRef.current);
+    }
+    debounceRef.current = setTimeout(() => {
+      loadWorkspaceRef.current("hotspots");
+    }, 350);
+  }, []);
 
   useEffect(() => {
     if (!mapReady || !mapEl.current || mapRef.current || !window.AMap) return;
@@ -116,24 +187,41 @@ export function NewsMap({ mapKey, mapSecurityCode, dates, channels, databaseRead
       mapStyle: "amap://styles/normal",
     });
     window.__mapnewsMap = mapRef.current;
-    mapRef.current.on("complete", loadWorkspace);
-    mapRef.current.on("moveend", loadWorkspace);
-    mapRef.current.on("zoomend", loadWorkspace);
-    loadWorkspace();
-  }, [loadWorkspace, mapReady]);
+    mapRef.current.on("complete", () => loadWorkspaceRef.current("full"));
+    mapRef.current.on("moveend", scheduleHotspotLoad);
+    mapRef.current.on("zoomend", scheduleHotspotLoad);
+    loadWorkspace("full");
+  }, [loadWorkspace, mapReady, scheduleHotspotLoad]);
 
   useEffect(() => {
-    loadWorkspace();
-  }, [filters, loadWorkspace]);
+    if (!databaseReady) return;
+    const previousFilters = previousFiltersRef.current;
+    previousFiltersRef.current = filters;
+    if (!previousFilters) return;
+    const mode: LoadMode = previousFilters.date === filters.date ? "hotspots" : "full";
+    if (debounceRef.current) {
+      clearTimeout(debounceRef.current);
+    }
+    debounceRef.current = setTimeout(() => {
+      loadWorkspace(mode);
+    }, 300);
+    return () => {
+      if (debounceRef.current) {
+        clearTimeout(debounceRef.current);
+      }
+    };
+  }, [databaseReady, filters, loadWorkspace]);
 
   useEffect(() => {
     if (!mapRef.current || !window.AMap) return;
     clearMarkers();
     markersRef.current = hotspots.map((hotspot) => {
+      const color = CHANNEL_COLORS[hotspot.channel] ?? "#0f8f7f";
       const marker = new window.AMap!.Marker({
         map: mapRef.current!,
         position: [hotspot.lng, hotspot.lat],
         title: hotspot.summary,
+        content: `<span class="hotspot-marker" style="--marker-color: ${color}">${hotspot.channel.slice(0, 1)}</span>`,
       });
       marker.on("click", () => openHotspot(hotspot.id));
       return marker;
@@ -147,14 +235,14 @@ export function NewsMap({ mapKey, mapSecurityCode, dates, channels, databaseRead
     setSelected(payload.hotspot ?? null);
   }
 
-  function locateRankingItem(item: HotspotRankingItem) {
+  function locateRankingItem(item: MapHotspot) {
     mapRef.current?.setZoomAndCenter(6, [item.lng, item.lat]);
     openHotspot(item.id);
   }
 
   function searchRegion() {
     if (!filters.region.trim()) return;
-    loadWorkspace();
+    loadWorkspace("hotspots");
   }
 
   return (

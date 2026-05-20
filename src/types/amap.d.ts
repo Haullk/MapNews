@@ -44,6 +44,7 @@ declare global {
     map: AMapMap;
     position: [number, number];
     title?: string;
+    content?: string;
   }
 
   interface AMapMarker {

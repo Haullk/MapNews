@@ -2,6 +2,7 @@ import { getPool } from "./db";
 
 export const CHANNELS = ["国际", "冲突", "政治", "经济", "灾害", "社会"] as const;
 export type Channel = (typeof CHANNELS)[number];
+const DEFAULT_CHANNELS: readonly string[] = CHANNELS;
 
 export interface QueryStatus {
   ok: boolean;
@@ -34,10 +35,6 @@ export interface MapHotspot {
   sourceCount: number;
   dataDate: string;
   summary: string;
-}
-
-export interface HotspotRankingItem extends MapHotspot {
-  dataTime: string;
 }
 
 export interface HotspotSource {
@@ -117,24 +114,40 @@ export async function getDefaultDate(): Promise<string | null> {
 export async function getInitialWorkspaceData() {
   try {
     const pool = getPool();
-    const [dates, status] = await Promise.all([
+    const [dates, channels, status] = await Promise.all([
       pool.query<{ data_date: string }>("select distinct data_date::text from map_hotspots order by data_date desc limit 14"),
+      getAvailableChannels(),
       getDataStatus(),
     ]);
     return {
       dates: dates.rows.map((row) => row.data_date),
-      channels: CHANNELS,
+      channels,
       databaseReady: status.databaseAvailable,
       status,
     };
   } catch {
     return {
       dates: [],
-      channels: CHANNELS,
+      channels: DEFAULT_CHANNELS,
       databaseReady: false,
       status: databaseDownStatus(),
     };
   }
+}
+
+export async function getAvailableChannels(): Promise<readonly string[]> {
+  const pool = getPool();
+  const result = await pool.query<{ channel: string }>(
+    `
+      select channel, min(priority) as priority
+      from gdelt_channel_mappings
+      where enabled = true
+      group by channel
+      order by min(priority), channel
+    `,
+  );
+  const channels = result.rows.map((row) => row.channel);
+  return channels.length > 0 ? channels : DEFAULT_CHANNELS;
 }
 
 function applyFilters(filters: HotspotFilters, params: Array<string | number>, where: string[]) {
@@ -188,11 +201,6 @@ export async function queryMapHotspots(filters: HotspotFilters) {
       emptyReason: hotspots.length ? undefined : "empty",
     } satisfies QueryStatus,
   };
-}
-
-export async function queryHotspotRanking(filters: HotspotFilters): Promise<HotspotRankingItem[]> {
-  const result = await queryMapHotspots({ ...filters, limit: filters.limit ?? 20, bbox: undefined });
-  return result.hotspots.map((hotspot) => ({ ...hotspot, dataTime: hotspot.dataDate }));
 }
 
 export async function getHotspotDetail(id: number): Promise<HotspotDetail | null> {
@@ -269,7 +277,7 @@ export async function getDailyBrief(date?: string): Promise<DailyBrief> {
     hotspotCount: Number(row.hotspot_count),
     topRegions: row.top_regions,
     topChannels: row.top_channels,
-    freshnessText: `数据更新于 ${row.data_updated_at}`,
+    freshnessText: `数据覆盖至 ${row.data_updated_at}`,
     completenessText: status.isComplete ? "本日数据导入完整。" : "最近一次导入未完整完成，热点可能不完整。",
     briefText: row.brief_text,
   };

@@ -307,6 +307,21 @@ button {
   box-shadow: 0 10px 25px rgba(29, 36, 51, 0.08);
 }
 
+.hotspot-marker {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border: 2px solid #fff;
+  border-radius: 999px;
+  background: var(--marker-color, var(--accent));
+  color: #fff;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1;
+  box-shadow: 0 0 0 7px color-mix(in srgb, var(--marker-color, var(--accent)) 22%, transparent);
+}
+
 @media (max-width: 900px) {
   .toolbar {
     align-items: flex-start;
