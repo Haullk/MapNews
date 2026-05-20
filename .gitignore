@@ -16,3 +16,14 @@ __pycache__/
 .venv/
 .npm-cache/
 tsconfig.tsbuildinfo
+
+# Local workspace and planning docs
+.idea/
+mapnews/
+background.md
+high-level-design.md
+prompt.md
+proposal*.md
+tasks/
+*.bak*.md
+概念图.png

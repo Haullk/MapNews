@@ -26,6 +26,7 @@ declare global {
     getBounds(): AMapBounds;
     getZoom(): number;
     setZoom(zoom: number): void;
+    setZoomAndCenter(zoom: number, center: [number, number]): void;
     on(eventName: string, handler: () => void): void;
   }
 

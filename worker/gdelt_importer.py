@@ -5,11 +5,11 @@ import csv
 import io
 import os
 import zipfile
+from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import Iterable
-
+from typing import Any
 
 EVENT_COLUMNS = 61
 
@@ -22,7 +22,7 @@ class ImportStats:
     rows_inserted: int = 0
     rows_skipped: int = 0
 
-    def add(self, other: "ImportStats") -> "ImportStats":
+    def add(self, other: ImportStats) -> ImportStats:
         return ImportStats(
             files_attempted=self.files_attempted + other.files_attempted,
             files_imported=self.files_imported + other.files_imported,
@@ -43,11 +43,11 @@ def parse_args() -> argparse.Namespace:
 def import_date(value: str | None) -> date:
     if value:
         return datetime.strptime(value, "%Y-%m-%d").date()
-    return (datetime.now(timezone.utc) - timedelta(days=1)).date()
+    return (datetime.now(UTC) - timedelta(days=1)).date()
 
 
 def intervals(day: date) -> Iterable[datetime]:
-    start = datetime(day.year, day.month, day.day, tzinfo=timezone.utc)
+    start = datetime(day.year, day.month, day.day, tzinfo=UTC)
     for index in range(96):
         yield start + timedelta(minutes=15 * index)
 
@@ -94,7 +94,7 @@ def parse_event_date(value: str) -> date:
 def parse_date_added(value: str) -> datetime | None:
     if not value:
         return None
-    return datetime.strptime(value, "%Y%m%d%H%M%S").replace(tzinfo=timezone.utc)
+    return datetime.strptime(value, "%Y%m%d%H%M%S").replace(tzinfo=UTC)
 
 
 def row_to_record(row: list[str]) -> tuple | None:
@@ -169,7 +169,7 @@ on conflict (global_event_id) do nothing
 """
 
 
-def import_zip(conn, zip_path: Path) -> ImportStats:
+def import_zip(conn: Any, zip_path: Path) -> ImportStats:
     rows_seen = 0
     rows_inserted = 0
     rows_skipped = 0
@@ -192,10 +192,15 @@ def import_zip(conn, zip_path: Path) -> ImportStats:
                     if cur.rowcount == 0:
                         rows_skipped += 1
 
-    return ImportStats(files_imported=1, rows_seen=rows_seen, rows_inserted=rows_inserted, rows_skipped=rows_skipped)
+    return ImportStats(
+        files_imported=1,
+        rows_seen=rows_seen,
+        rows_inserted=rows_inserted,
+        rows_skipped=rows_skipped,
+    )
 
 
-def start_batch(conn, day: date) -> int:
+def start_batch(conn: Any, day: date) -> int:
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -210,10 +215,13 @@ def start_batch(conn, day: date) -> int:
             """,
             (day,),
         )
-        return int(cur.fetchone()[0])
+        row = cur.fetchone()
+        if row is None:
+            raise RuntimeError("Failed to create import batch.")
+        return int(row[0])
 
 
-def finish_batch(conn, batch_id: int, stats: ImportStats, status: str, error: str | None = None) -> None:
+def finish_batch(conn: Any, batch_id: int, stats: ImportStats, status: str, error: str | None = None) -> None:
     with conn.cursor() as cur:
         cur.execute(
             """

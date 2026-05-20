@@ -1,68 +1,58 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { EventDetail, MapEvent } from "@/lib/events";
+import { useCallback, useEffect, useRef, useState } from "react";
+import type { DataStatus, DailyBrief, HotspotDetail, HotspotRankingItem, MapHotspot } from "@/lib/hotspots";
 
 interface NewsMapProps {
   mapKey: string;
   mapSecurityCode: string;
   dates: string[];
-  eventCodes: Array<{ value: string; label: string }>;
-  countries: string[];
+  channels: readonly string[];
   databaseReady: boolean;
+  initialStatus: DataStatus;
 }
 
 interface Filters {
   date: string;
-  eventCode: string;
-  country: string;
+  channel: string;
+  region: string;
 }
 
-export function NewsMap({ mapKey, mapSecurityCode, dates, eventCodes, countries, databaseReady }: NewsMapProps) {
+type HotspotsPayload = { hotspots: MapHotspot[]; status: { message: string; ok: boolean } };
+
+export function NewsMap({ mapKey, mapSecurityCode, dates, channels, databaseReady, initialStatus }: NewsMapProps) {
   const mapEl = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<AMapMap | null>(null);
   const markersRef = useRef<AMapMarker[]>([]);
   const [mapReady, setMapReady] = useState(false);
-  const [events, setEvents] = useState<MapEvent[]>([]);
-  const [visibleEvents, setVisibleEvents] = useState<MapEvent[]>([]);
-  const [selected, setSelected] = useState<EventDetail | null>(null);
+  const [hotspots, setHotspots] = useState<MapHotspot[]>([]);
+  const [ranking, setRanking] = useState<HotspotRankingItem[]>([]);
+  const [brief, setBrief] = useState<DailyBrief | null>(null);
+  const [selected, setSelected] = useState<HotspotDetail | null>(null);
+  const [status, setStatus] = useState<DataStatus>(initialStatus);
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
-  const [filters, setFilters] = useState<Filters>({
-    date: dates[0] ?? "",
-    eventCode: "",
-    country: "",
-  });
-
+  const [filters, setFilters] = useState<Filters>({ date: dates[0] ?? "", channel: "", region: "" });
   const canLoadMap = mapKey.trim().length > 0;
 
   useEffect(() => {
-    if (!canLoadMap || window.AMap) {
-      return;
-    }
-
+    if (!canLoadMap || window.AMap) return;
     if (mapSecurityCode.trim()) {
-      window._AMapSecurityConfig = {
-        securityJsCode: mapSecurityCode.trim(),
-      };
+      window._AMapSecurityConfig = { securityJsCode: mapSecurityCode.trim() };
     }
-
     window.initAmap = () => setMapReady(true);
     const script = document.createElement("script");
     script.src = `https://webapi.amap.com/maps?v=2.0&key=${encodeURIComponent(mapKey)}&callback=initAmap`;
     script.async = true;
-    script.onerror = () => setMessage("高德地图脚本加载失败，请检查地图 Key、服务平台和域名白名单。");
+    script.onerror = () => setMessage("地图加载失败，请检查高德 Web 端 Key、服务平台和域名白名单。");
     document.head.appendChild(script);
-
     return () => {
       window.initAmap = undefined;
     };
   }, [canLoadMap, mapKey, mapSecurityCode]);
 
   useEffect(() => {
-    if (window.AMap) {
-      setMapReady(true);
-    }
+    if (window.AMap) setMapReady(true);
   }, []);
 
   const clearMarkers = useCallback(() => {
@@ -70,58 +60,55 @@ export function NewsMap({ mapKey, mapSecurityCode, dates, eventCodes, countries,
     markersRef.current = [];
   }, []);
 
-  const loadEvents = useCallback(async () => {
-    const map = mapRef.current;
-    if (!map || !databaseReady) {
-      return;
-    }
+  const queryParams = useCallback(
+    (withBounds: boolean) => {
+      const params = new URLSearchParams();
+      if (filters.date) params.set("date", filters.date);
+      if (filters.channel) params.set("channel", filters.channel);
+      if (filters.region) params.set("region", filters.region);
+      const map = mapRef.current;
+      if (withBounds && map) {
+        const bounds = map.getBounds();
+        const ne = bounds.getNorthEast();
+        const sw = bounds.getSouthWest();
+        params.set("west", String(sw.getLng()));
+        params.set("south", String(sw.getLat()));
+        params.set("east", String(ne.getLng()));
+        params.set("north", String(ne.getLat()));
+      }
+      return params;
+    },
+    [filters],
+  );
 
-    const bounds = map.getBounds();
-    const ne = bounds.getNorthEast();
-    const sw = bounds.getSouthWest();
-    const params = new URLSearchParams({
-      west: String(sw.getLng()),
-      south: String(sw.getLat()),
-      east: String(ne.getLng()),
-      north: String(ne.getLat()),
-      zoom: String(map.getZoom()),
-    });
-
-    if (filters.date) params.set("date", filters.date);
-    if (filters.eventCode) params.set("eventCode", filters.eventCode);
-    if (filters.country) params.set("country", filters.country);
-
+  const loadWorkspace = useCallback(async () => {
+    if (!databaseReady) return;
     setLoading(true);
-    setMessage(null);
-
     try {
-      const response = await fetch(`/map-data?${params.toString()}`, {
-        cache: "no-store",
-      });
-      const payload = (await response.json()) as { events: MapEvent[]; error?: string };
-
-      if (!response.ok) {
-        throw new Error(payload.error ?? "地图数据查询失败");
-      }
-
-      if (payload.events.length > 0) {
-        setEvents(payload.events);
-        setVisibleEvents(payload.events);
-      } else {
-        setMessage("当前视窗没有事件，已保留最近一次结果；拖动地图或缩小范围可继续探索。");
-      }
+      const [hotspotResponse, rankingResponse, briefResponse, statusResponse] = await Promise.all([
+        fetch(`/api/hotspots?${queryParams(Boolean(mapRef.current)).toString()}`, { cache: "no-store" }),
+        fetch(`/api/hotspot-ranking?${queryParams(false).toString()}`, { cache: "no-store" }),
+        fetch(`/api/daily-brief?${queryParams(false).toString()}`, { cache: "no-store" }),
+        fetch("/api/data-status", { cache: "no-store" }),
+      ]);
+      const hotspotPayload = (await hotspotResponse.json()) as HotspotsPayload;
+      const rankingPayload = (await rankingResponse.json()) as { items: HotspotRankingItem[] };
+      const briefPayload = (await briefResponse.json()) as { brief: DailyBrief };
+      const statusPayload = (await statusResponse.json()) as { status: DataStatus };
+      setHotspots(hotspotPayload.hotspots);
+      setRanking(rankingPayload.items);
+      setBrief(briefPayload.brief);
+      setStatus(statusPayload.status);
+      setMessage(hotspotPayload.status.message);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "地图数据查询失败");
+      setMessage(error instanceof Error ? error.message : "热点数据加载失败");
     } finally {
       setLoading(false);
     }
-  }, [databaseReady, filters.country, filters.date, filters.eventCode]);
+  }, [databaseReady, queryParams]);
 
   useEffect(() => {
-    if (!mapReady || !mapEl.current || mapRef.current || !window.AMap) {
-      return;
-    }
-
+    if (!mapReady || !mapEl.current || mapRef.current || !window.AMap) return;
     mapRef.current = new window.AMap.Map(mapEl.current, {
       center: [105, 30],
       zoom: 3,
@@ -129,163 +116,168 @@ export function NewsMap({ mapKey, mapSecurityCode, dates, eventCodes, countries,
       mapStyle: "amap://styles/normal",
     });
     window.__mapnewsMap = mapRef.current;
-
-    mapRef.current.on("complete", loadEvents);
-    mapRef.current.on("moveend", loadEvents);
-    mapRef.current.on("zoomend", loadEvents);
-    loadEvents();
-  }, [loadEvents, mapReady]);
-
-  useEffect(() => {
-    if (!mapRef.current) {
-      return;
-    }
-
-    loadEvents();
-  }, [filters, loadEvents]);
+    mapRef.current.on("complete", loadWorkspace);
+    mapRef.current.on("moveend", loadWorkspace);
+    mapRef.current.on("zoomend", loadWorkspace);
+    loadWorkspace();
+  }, [loadWorkspace, mapReady]);
 
   useEffect(() => {
-    if (!mapRef.current || !window.AMap) {
-      return;
-    }
+    loadWorkspace();
+  }, [filters, loadWorkspace]);
 
+  useEffect(() => {
+    if (!mapRef.current || !window.AMap) return;
     clearMarkers();
-    markersRef.current = visibleEvents.map((event) => {
+    markersRef.current = hotspots.map((hotspot) => {
       const marker = new window.AMap!.Marker({
         map: mapRef.current!,
-        position: [event.lng, event.lat],
-        title: event.title,
+        position: [hotspot.lng, hotspot.lat],
+        title: hotspot.summary,
       });
-
-      marker.on("click", async () => {
-        setSelected(null);
-        const response = await fetch(`/event-detail/${event.id}`, { cache: "no-store" });
-        const payload = (await response.json()) as { event?: EventDetail };
-        setSelected(payload.event ?? null);
-      });
-
+      marker.on("click", () => openHotspot(hotspot.id));
       return marker;
     });
-
     return clearMarkers;
-  }, [clearMarkers, visibleEvents]);
+  }, [clearMarkers, hotspots]);
 
-  const quickStats = useMemo(() => {
-    const articleCount = events.reduce((sum, event) => sum + event.articleCount, 0);
-    return [
-      { label: "事件点", value: events.length.toLocaleString("zh-CN") },
-      { label: "关联报道", value: articleCount.toLocaleString("zh-CN") },
-      { label: "当前日期", value: filters.date || "全部" },
-    ];
-  }, [events, filters.date]);
+  async function openHotspot(id: number) {
+    const response = await fetch(`/api/hotspots/${id}`, { cache: "no-store" });
+    const payload = (await response.json()) as { hotspot?: HotspotDetail };
+    setSelected(payload.hotspot ?? null);
+  }
+
+  function locateRankingItem(item: HotspotRankingItem) {
+    mapRef.current?.setZoomAndCenter(6, [item.lng, item.lat]);
+    openHotspot(item.id);
+  }
+
+  function searchRegion() {
+    if (!filters.region.trim()) return;
+    loadWorkspace();
+  }
 
   return (
     <section className="map-workspace">
-      <aside className="control-panel" aria-label="筛选条件">
-        <label>
-          日期
-          <select value={filters.date} onChange={(event) => setFilters((prev) => ({ ...prev, date: event.target.value }))}>
-            <option value="">全部日期</option>
-            {dates.map((date) => (
-              <option key={date} value={date}>
-                {date}
-              </option>
-            ))}
-          </select>
-        </label>
+      <aside className="control-panel" aria-label="地图新闻工作台">
+        <div className="sidebar-section">
+          <p className="eyebrow">今日地图简报</p>
+          <p className="brief-text">{brief?.briefText ?? "正在读取今日地图简报。"}</p>
+          <div className="status-note">{brief?.completenessText ?? status.message}</div>
+        </div>
 
-        <label>
-          事件类型
-          <select
-            value={filters.eventCode}
-            onChange={(event) => setFilters((prev) => ({ ...prev, eventCode: event.target.value }))}
-          >
-            <option value="">全部类型</option>
-            {eventCodes.map((code) => (
-              <option key={code.value} value={code.value.slice(0, 2)}>
-                {code.value} {code.label}
-              </option>
-            ))}
-          </select>
-        </label>
-
-        <label>
-          国家/地区代码
-          <select
-            value={filters.country}
-            onChange={(event) => setFilters((prev) => ({ ...prev, country: event.target.value }))}
-          >
-            <option value="">全球</option>
-            {countries.map((country) => (
-              <option key={country} value={country}>
-                {country}
-              </option>
-            ))}
-          </select>
-        </label>
+        <div className="sidebar-section filters-grid">
+          <label>
+            日期
+            <select value={filters.date} onChange={(event) => setFilters((prev) => ({ ...prev, date: event.target.value }))}>
+              <option value="">最近可用</option>
+              {dates.map((date) => (
+                <option key={date} value={date}>
+                  {date}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            频道
+            <select
+              value={filters.channel}
+              onChange={(event) => setFilters((prev) => ({ ...prev, channel: event.target.value }))}
+            >
+              <option value="">全部频道</option>
+              {channels.map((channel) => (
+                <option key={channel} value={channel}>
+                  {channel}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="region-search">
+            地区搜索
+            <span className="search-row">
+              <input
+                value={filters.region}
+                onChange={(event) => setFilters((prev) => ({ ...prev, region: event.target.value }))}
+                placeholder="国家、城市或地区"
+              />
+              <button type="button" onClick={searchRegion}>
+                搜索
+              </button>
+            </span>
+          </label>
+        </div>
 
         <div className="stats-grid">
-          {quickStats.map((stat) => (
-            <div className="stat-cell" key={stat.label}>
-              <span>{stat.label}</span>
-              <strong>{stat.value}</strong>
-            </div>
-          ))}
+          <div className="stat-cell">
+            <span>热点</span>
+            <strong>{hotspots.length}</strong>
+          </div>
+          <div className="stat-cell">
+            <span>当前日期</span>
+            <strong>{status.currentDataDate ?? filters.date ?? "暂无"}</strong>
+          </div>
+          <div className="stat-cell">
+            <span>导入状态</span>
+            <strong>{status.isComplete ? "完整" : "待确认"}</strong>
+          </div>
+        </div>
+
+        <div className="sidebar-section">
+          <p className="eyebrow">热点排行</p>
+          <div className="ranking-list">
+            {ranking.map((item) => (
+              <button key={item.id} type="button" className="ranking-item" onClick={() => locateRankingItem(item)}>
+                <span>{item.regionName}</span>
+                <strong>{item.channel}</strong>
+                <small>
+                  {item.eventCount} 个事件 · {item.sourceCount} 个来源
+                </small>
+              </button>
+            ))}
+            {ranking.length === 0 ? <div className="empty-detail">当前筛选下暂无热点排行。</div> : null}
+          </div>
         </div>
 
         {selected ? (
           <article className="detail-panel">
-            <p className="eyebrow">事件详情</p>
+            <p className="eyebrow">热点详情</p>
             <h2>{selected.summary}</h2>
             <dl>
               <div>
-                <dt>地点</dt>
-                <dd>{selected.actionGeoName || "未知"}</dd>
+                <dt>地区</dt>
+                <dd>{selected.regionName}</dd>
               </div>
               <div>
-                <dt>类型</dt>
-                <dd>{selected.eventCode}</dd>
+                <dt>频道</dt>
+                <dd>{selected.channel}</dd>
               </div>
               <div>
-                <dt>参与方</dt>
-                <dd>{[selected.actor1Name, selected.actor2Name].filter(Boolean).join(" / ") || "未知"}</dd>
+                <dt>热度</dt>
+                <dd>{selected.heatScore.toFixed(1)}</dd>
               </div>
               <div>
-                <dt>报道数</dt>
-                <dd>{selected.articleCount}</dd>
+                <dt>来源</dt>
+                <dd>
+                  {selected.sourceCount} 个来源，{selected.domainCount} 个域名
+                </dd>
               </div>
             </dl>
-            {selected.sourceUrl ? (
-              <a className="source-link" href={selected.sourceUrl} target="_blank" rel="noreferrer">
-                查看来源
-              </a>
-            ) : null}
+            <div className="source-list">
+              {selected.representativeSources.map((source) => (
+                <a key={source.url} href={source.url} target="_blank" rel="noreferrer">
+                  {source.domain ?? source.url}
+                </a>
+              ))}
+            </div>
           </article>
         ) : (
-          <div className="empty-detail">点击地图事件点查看详情。</div>
+          <div className="empty-detail">点击地图热点或排行项查看基础详情。</div>
         )}
       </aside>
 
       <div className="map-stage">
-        {canLoadMap ? (
-          <div ref={mapEl} className="map-canvas" />
-        ) : (
-          <div className="map-placeholder">
-            <div className="preview-map">
-              <span className="preview-point point-a" />
-              <span className="preview-point point-b" />
-              <span className="preview-point point-c" />
-              <span className="preview-point point-d" />
-              <div className="preview-copy">
-                <strong>地图预览模式</strong>
-                <span>在 `.env.local` 配置 `NEXT_PUBLIC_AMAP_KEY` 后会加载高德地图。</span>
-              </div>
-            </div>
-          </div>
-        )}
-        <div className="map-overlay">
-          {loading ? "正在加载事件..." : message ?? (databaseReady ? "拖动或缩放地图刷新事件" : "请先初始化数据库并导入数据")}
-        </div>
+        {canLoadMap ? <div ref={mapEl} className="map-canvas" /> : <div className="map-placeholder">请配置高德地图 Key。</div>}
+        <div className="map-overlay">{loading ? "正在加载热点..." : message ?? status.message}</div>
       </div>
     </section>
   );

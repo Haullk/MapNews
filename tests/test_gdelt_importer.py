@@ -1,5 +1,5 @@
-from datetime import date, datetime, timezone
 import unittest
+from datetime import UTC, date, datetime
 
 from worker.gdelt_importer import import_date, intervals, row_to_record
 
@@ -41,8 +41,8 @@ class GdeltImporterTests(unittest.TestCase):
         slots = list(intervals(date(2026, 5, 17)))
 
         self.assertEqual(len(slots), 96)
-        self.assertEqual(slots[0], datetime(2026, 5, 17, 0, 0, tzinfo=timezone.utc))
-        self.assertEqual(slots[-1], datetime(2026, 5, 17, 23, 45, tzinfo=timezone.utc))
+        self.assertEqual(slots[0], datetime(2026, 5, 17, 0, 0, tzinfo=UTC))
+        self.assertEqual(slots[-1], datetime(2026, 5, 17, 23, 45, tzinfo=UTC))
 
     def test_row_to_record_parses_valid_action_geo(self) -> None:
         record = row_to_record(sample_row())
