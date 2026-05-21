@@ -23,12 +23,26 @@ export interface HotspotFilters {
   };
 }
 
+export interface HotspotChannelBreakdown {
+  hotspotId: number;
+  channel: string;
+  heatScore: number;
+  eventCount: number;
+  mentionCount: number;
+  sourceCount: number;
+  summary: string;
+}
+
 export interface MapHotspot {
   id: number;
+  regionKey: string;
   regionName: string;
   lat: number;
   lng: number;
   channel: string;
+  primaryHotspotId: number;
+  channelCount: number;
+  channelBreakdown: HotspotChannelBreakdown[];
   heatScore: number;
   eventCount: number;
   mentionCount: number;
@@ -175,6 +189,28 @@ function entityArray(value: unknown): HotspotEntity[] {
     .filter((item): item is HotspotEntity => item !== null && item.name.length > 0);
 }
 
+function channelBreakdownArray(value: unknown): HotspotChannelBreakdown[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => {
+      if (!item || typeof item !== "object") return null;
+      const record = item as Record<string, unknown>;
+      const hotspotId = numberValue(record.hotspotId);
+      const channel = String(record.channel ?? "");
+      if (!hotspotId || !channel) return null;
+      return {
+        hotspotId,
+        channel,
+        heatScore: numberValue(record.heatScore),
+        eventCount: numberValue(record.eventCount),
+        mentionCount: numberValue(record.mentionCount),
+        sourceCount: numberValue(record.sourceCount),
+        summary: String(record.summary ?? ""),
+      };
+    })
+    .filter((item): item is HotspotChannelBreakdown => item !== null);
+}
+
 function sourceQuality(value: unknown, fallback: { sourceCount: number; domainCount: number }): SourceQuality {
   const record = value && typeof value === "object" ? (value as Record<string, unknown>) : {};
   return {
@@ -195,10 +231,14 @@ function sourceQuality(value: unknown, fallback: { sourceCount: number; domainCo
 
 function hotspotFromRow(row: {
   id: number;
+  region_key?: string;
   region_name: string;
   centroid_lat: number | string;
   centroid_long: number | string;
   channel: string;
+  primary_hotspot_id?: number | string;
+  channel_count?: number | string;
+  channel_breakdown?: unknown;
   heat_score: number | string;
   event_count: number | string;
   mention_count: number | string;
@@ -206,16 +246,40 @@ function hotspotFromRow(row: {
   data_date: string;
   summary: string;
 }): MapHotspot {
+  const id = Number(row.id);
+  const heatScore = Number(row.heat_score);
+  const eventCount = Number(row.event_count);
+  const mentionCount = Number(row.mention_count);
+  const sourceCount = Number(row.source_count);
+  const primaryHotspotId = Number(row.primary_hotspot_id ?? row.id);
+  const channelBreakdown = channelBreakdownArray(row.channel_breakdown);
   return {
-    id: Number(row.id),
+    id,
+    regionKey: row.region_key ?? row.region_name,
     regionName: row.region_name,
     lat: Number(row.centroid_lat),
     lng: Number(row.centroid_long),
     channel: row.channel,
-    heatScore: Number(row.heat_score),
-    eventCount: Number(row.event_count),
-    mentionCount: Number(row.mention_count),
-    sourceCount: Number(row.source_count),
+    primaryHotspotId,
+    channelCount: numberValue(row.channel_count ?? (channelBreakdown.length || 1)),
+    channelBreakdown:
+      channelBreakdown.length > 0
+        ? channelBreakdown
+        : [
+            {
+              hotspotId: primaryHotspotId,
+              channel: row.channel,
+              heatScore,
+              eventCount,
+              mentionCount,
+              sourceCount,
+              summary: row.summary,
+            },
+          ],
+    heatScore,
+    eventCount,
+    mentionCount,
+    sourceCount,
     dataDate: row.data_date,
     summary: row.summary,
   };
@@ -301,10 +365,50 @@ export async function queryMapHotspots(filters: HotspotFilters) {
     Parameters<typeof hotspotFromRow>[0]
   >(
     `
-      select id, region_name, centroid_lat, centroid_long, channel, heat_score,
-             event_count, mention_count, source_count, data_date::text, summary
-      from map_hotspots
-      ${where.length ? `where ${where.join(" and ")}` : ""}
+      with filtered as (
+        select *
+        from map_hotspots
+        ${where.length ? `where ${where.join(" and ")}` : ""}
+      ),
+      grouped as (
+        select
+          (array_agg(id order by heat_score desc, event_count desc, id asc))[1] as id,
+          (array_agg(id order by heat_score desc, event_count desc, id asc))[1] as primary_hotspot_id,
+          data_date,
+          region_key,
+          (array_agg(region_name order by heat_score desc, event_count desc, id asc))[1] as region_name,
+          (array_agg(channel order by heat_score desc, event_count desc, id asc))[1] as channel,
+          sum(centroid_lat * greatest(event_count, 1)) / nullif(sum(greatest(event_count, 1)), 0) as centroid_lat,
+          sum(centroid_long * greatest(event_count, 1)) / nullif(sum(greatest(event_count, 1)), 0) as centroid_long,
+          sum(heat_score) as heat_score,
+          sum(event_count) as event_count,
+          sum(mention_count) as mention_count,
+          sum(source_count) as source_count,
+          count(*) as channel_count,
+          jsonb_agg(
+            jsonb_build_object(
+              'hotspotId', id,
+              'channel', channel,
+              'heatScore', heat_score,
+              'eventCount', event_count,
+              'mentionCount', mention_count,
+              'sourceCount', source_count,
+              'summary', summary
+            )
+            order by heat_score desc, event_count desc, id asc
+          ) as channel_breakdown
+        from filtered
+        group by data_date, region_key
+      )
+      select id, primary_hotspot_id, data_date::text, region_key, region_name, channel,
+             centroid_lat, centroid_long, heat_score, event_count, mention_count, source_count,
+             channel_count, channel_breakdown,
+             concat(
+               data_date::text, '，', region_name, '出现地区综合热点，主频道为', channel,
+               '，包含 ', event_count, ' 个事件、', mention_count,
+               ' 次相关报道提及，覆盖 ', channel_count, ' 个频道。'
+             ) as summary
+      from grouped
       order by heat_score desc, event_count desc
       limit $${params.length}
     `,
@@ -330,7 +434,7 @@ export async function getHotspotDetail(id: number): Promise<HotspotDetail | null
       data_updated_at: string;
     }>(
       `
-        select id, region_name, centroid_lat, centroid_long, channel, heat_score,
+        select id, region_key, region_name, centroid_lat, centroid_long, channel, heat_score,
                event_count, mention_count, article_count, source_count, source_domain_count,
                data_date::text, summary, data_updated_at::text
         from map_hotspots

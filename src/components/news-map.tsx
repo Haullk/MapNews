@@ -65,6 +65,13 @@ interface MapView {
   k: number;
 }
 
+interface MapBounds {
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+}
+
 interface SearchTarget {
   id: string;
   type: "country" | "region" | "place";
@@ -84,6 +91,26 @@ type EnrichmentState = {
   hotspotId: number;
   status: "running" | "success" | "error";
   message: string;
+};
+type HotspotChannelSegment = {
+  channel: string;
+  color: string;
+  path: string;
+  share: number;
+};
+type HotspotMarker = {
+  hotspot: MapHotspot;
+  x: number;
+  y: number;
+  color: string;
+  sizePx: number;
+  label: string;
+  ringRadius: number;
+  segments: HotspotChannelSegment[];
+  channelSummary: string;
+  heatIntensity: number;
+  collisionRadius: number;
+  selected: boolean;
 };
 
 const MAP_VIEW_MIN_ZOOM = 1;
@@ -155,6 +182,126 @@ function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
 }
 
+function quantile(sortedValues: number[], ratio: number) {
+  if (sortedValues.length === 0) return 0;
+  const index = Math.min(sortedValues.length - 1, Math.max(0, Math.floor((sortedValues.length - 1) * ratio)));
+  return sortedValues[index];
+}
+
+function markerSizeForHeat(heatScore: number, lowHeat: number, highHeat: number) {
+  const low = Math.max(1, lowHeat);
+  const high = Math.max(low + 1, highHeat);
+  const normalized = clamp((Math.log(heatScore + 1) - Math.log(low + 1)) / (Math.log(high + 1) - Math.log(low + 1)), 0, 1);
+  return Math.round(20 + Math.sqrt(normalized) * 28);
+}
+
+function heatIntensityFor(heatScore: number, lowHeat: number, highHeat: number) {
+  const low = Math.max(1, lowHeat);
+  const high = Math.max(low + 1, highHeat);
+  return clamp((Math.log(heatScore + 1) - Math.log(low + 1)) / (Math.log(high + 1) - Math.log(low + 1)), 0, 1);
+}
+
+function hotspotLimitForZoom(zoom: number) {
+  if (zoom <= 1.4) return 90;
+  if (zoom <= 2.2) return 160;
+  if (zoom <= 4) return 260;
+  if (zoom <= 8) return 420;
+  return Number.POSITIVE_INFINITY;
+}
+
+function hotspotCandidateLimitForZoom(zoom: number, total: number) {
+  const visibleLimit = hotspotLimitForZoom(zoom);
+  if (!Number.isFinite(visibleLimit)) return total;
+  return Math.min(total, visibleLimit * 4);
+}
+
+function hotspotSpacingForZoom(zoom: number) {
+  if (zoom <= 1.4) return 14;
+  if (zoom <= 2.2) return 10;
+  if (zoom <= 4) return 6;
+  if (zoom <= 8) return 4;
+  return 2;
+}
+
+function pointOnCircle(radius: number, angle: number) {
+  return {
+    x: Math.cos(angle) * radius,
+    y: Math.sin(angle) * radius,
+  };
+}
+
+function arcPath(radius: number, startAngle: number, endAngle: number) {
+  const start = pointOnCircle(radius, startAngle);
+  const end = pointOnCircle(radius, endAngle);
+  const largeArcFlag = endAngle - startAngle > Math.PI ? 1 : 0;
+  return `M ${start.x.toFixed(3)} ${start.y.toFixed(3)} A ${radius} ${radius} 0 ${largeArcFlag} 1 ${end.x.toFixed(3)} ${end.y.toFixed(3)}`;
+}
+
+function channelSegments(
+  breakdown: MapHotspot["channelBreakdown"],
+  totalHeatScore: number,
+  ringRadius: number,
+): HotspotChannelSegment[] {
+  const orderedChannels = [...breakdown].sort((a, b) => b.heatScore - a.heatScore);
+  const positiveHeatTotal = orderedChannels.reduce((sum, item) => sum + Math.max(0, item.heatScore), 0);
+  const totalHeat = positiveHeatTotal || Math.max(0, totalHeatScore);
+  if (orderedChannels.length === 0 || totalHeat <= 0) return [];
+  if (orderedChannels.length === 1) {
+    const channel = orderedChannels[0];
+    return [
+      {
+        channel: channel.channel,
+        color: CHANNEL_COLORS[channel.channel] ?? "#0f8f7f",
+        path: "",
+        share: 1,
+      },
+    ];
+  }
+
+  const gapAngle = 0.04;
+  const availableAngle = Math.PI * 2 - gapAngle * orderedChannels.length;
+  let startAngle = -Math.PI / 2;
+  return orderedChannels.map((channel) => {
+    const share = Math.max(0, channel.heatScore) / totalHeat;
+    const endAngle = startAngle + availableAngle * share;
+    const segment = {
+      channel: channel.channel,
+      color: CHANNEL_COLORS[channel.channel] ?? "#0f8f7f",
+      path: arcPath(ringRadius, startAngle, endAngle),
+      share,
+    };
+    startAngle = endAngle + gapAngle;
+    return segment;
+  });
+}
+
+function declutterHotspotMarkers(markers: HotspotMarker[], zoom: number) {
+  const maxVisible = hotspotLimitForZoom(zoom);
+  const spacing = hotspotSpacingForZoom(zoom);
+  const selected = markers.find((marker) => marker.selected);
+  const kept: HotspotMarker[] = [];
+  const sortedMarkers = [...markers]
+    .filter((marker) => marker !== selected)
+    .sort((a, b) => b.hotspot.heatScore - a.hotspot.heatScore);
+
+  for (const marker of sortedMarkers) {
+    if (kept.length >= maxVisible) break;
+    const overlaps = kept.some((keptMarker) => {
+      const dx = marker.x - keptMarker.x;
+      const dy = marker.y - keptMarker.y;
+      const minDistance = marker.collisionRadius + keptMarker.collisionRadius + spacing;
+      return dx * dx + dy * dy < minDistance * minDistance;
+    });
+    if (!overlaps) kept.push(marker);
+  }
+
+  const visibleMarkers = selected ? [...kept, selected] : kept;
+  return visibleMarkers.sort((a, b) => {
+    if (a.selected !== b.selected) return a.selected ? 1 : -1;
+    return a.hotspot.heatScore - b.hotspot.heatScore;
+  });
+}
+
 function hotspotNeedsEnrichment(hotspot: HotspotDetail) {
   const quality = hotspot.explanation.sourceQuality;
   return !quality.enhanced || hotspot.storyGroups.length === 0 || quality.candidateSourceCount === 0;
@@ -213,8 +360,23 @@ function bboxFromView(projection: GeoProjection | null, view: MapView, size: Map
   };
 }
 
-function clampMapView(view: MapView, size: MapSize) {
+function clampMapAxis(offset: number, zoom: number, viewportLength: number, min: number, max: number) {
+  const contentLength = Math.max(1, (max - min) * zoom);
+  if (contentLength <= viewportLength) {
+    return (viewportLength - (min + max) * zoom) / 2;
+  }
+  return clamp(offset, viewportLength - max * zoom, -min * zoom);
+}
+
+function clampMapView(view: MapView, size: MapSize, bounds: MapBounds | null) {
   const k = clamp(view.k, MAP_VIEW_MIN_ZOOM, MAP_VIEW_MAX_ZOOM);
+  if (bounds && size.width > 0 && size.height > 0) {
+    return {
+      k,
+      x: clampMapAxis(view.x, k, size.width, bounds.x0, bounds.x1),
+      y: clampMapAxis(view.y, k, size.height, bounds.y0, bounds.y1),
+    };
+  }
   const limit = Math.max(size.width, size.height) * k;
   return {
     k,
@@ -243,6 +405,18 @@ function featureLabelPosition(
 function isScreenVisible(point: [number, number] | null, size: MapSize, margin = 40) {
   if (!point) return false;
   return point[0] >= -margin && point[0] <= size.width + margin && point[1] >= -margin && point[1] <= size.height + margin;
+}
+
+function viewportKey(projection: GeoProjection | null, view: MapView, size: MapSize) {
+  const bbox = bboxFromView(projection, view, size);
+  if (!bbox) return null;
+  return [
+    bbox.west.toFixed(2),
+    bbox.south.toFixed(2),
+    bbox.east.toFixed(2),
+    bbox.north.toFixed(2),
+    view.k.toFixed(2),
+  ].join(",");
 }
 
 function isProjectedBoundsVisible(bounds: [[number, number], [number, number]], view: MapView, size: MapSize, margin = 80) {
@@ -381,11 +555,13 @@ export function NewsMap({ dates, channels, databaseReady, initialStatus }: NewsM
   const statusCacheRef = useRef<DataStatus | null>(initialStatus);
   const previousFiltersRef = useRef<Filters | null>(null);
   const projectionRef = useRef<GeoProjection | null>(null);
+  const mapBoundsRef = useRef<MapBounds | null>(null);
   const sizeRef = useRef<MapSize>({ width: 0, height: 0 });
   const mapViewRef = useRef<MapView>({ x: 0, y: 0, k: 1 });
   const pendingMapViewRef = useRef<MapView | null>(null);
   const mapFrameRef = useRef<number | null>(null);
   const dragRef = useRef<{ pointerId: number; x: number; y: number; moved: boolean } | null>(null);
+  const previousViewportRef = useRef<string | null>(null);
 
   const [assets, setAssets] = useState<MapAssets | null>(null);
   const [mapLoadError, setMapLoadError] = useState<string | null>(null);
@@ -395,6 +571,7 @@ export function NewsMap({ dates, channels, databaseReady, initialStatus }: NewsM
   const [hotspots, setHotspots] = useState<MapHotspot[]>([]);
   const [ranking, setRanking] = useState<MapHotspot[]>([]);
   const [brief, setBrief] = useState<DailyBrief | null>(null);
+  const [selectedRegion, setSelectedRegion] = useState<MapHotspot | null>(null);
   const [selected, setSelected] = useState<HotspotDetail | null>(null);
   const [expandedStoryId, setExpandedStoryId] = useState<number | null>(null);
   const [panelView, setPanelView] = useState<PanelView>("ranking");
@@ -418,10 +595,36 @@ export function NewsMap({ dates, channels, databaseReady, initialStatus }: NewsM
   }, [assets, size]);
 
   const path = useMemo(() => (projection ? geoPath(projection) : null), [projection]);
+  const mapContentBounds = useMemo(() => {
+    if (!assets || !path) return null;
+    const [[x0, y0], [x1, y1]] = path.bounds(assets.countries as GeoPermissibleObjects);
+    return { x0, y0, x1, y1 };
+  }, [assets, path]);
   const mapReady = Boolean(assets && projection && size.width > 0 && size.height > 0);
-  const visibleHotspotLimit = mapView.k <= 1.4 ? 120 : mapView.k <= 2.2 ? 240 : hotspots.length;
-  const visibleHotspots = useMemo(() => hotspots.slice(0, visibleHotspotLimit), [hotspots, visibleHotspotLimit]);
+  const selectedRegionKey = selectedRegion ? `${selectedRegion.dataDate}-${selectedRegion.regionKey}` : null;
+  const candidateHotspots = useMemo(() => {
+    const limit = hotspotCandidateLimitForZoom(mapView.k, hotspots.length);
+    const candidates = hotspots.slice(0, limit);
+    if (selectedRegion && !candidates.some((hotspot) => hotspot.regionKey === selectedRegion.regionKey && hotspot.dataDate === selectedRegion.dataDate)) {
+      candidates.push(selectedRegion);
+    }
+    return candidates;
+  }, [hotspots, mapView.k, selectedRegion]);
+  const hotspotHeatScale = useMemo(() => {
+    const values = hotspots
+      .map((hotspot) => hotspot.heatScore)
+      .filter((heatScore) => Number.isFinite(heatScore) && heatScore > 0)
+      .sort((a, b) => a - b);
+    return {
+      low: quantile(values, 0.5),
+      high: quantile(values, 0.95),
+    };
+  }, [hotspots]);
   const maxRankingHeat = Math.max(...ranking.map((item) => item.heatScore), 1);
+  const selectedRegionMaxChannelHeat = Math.max(
+    ...(selectedRegion?.channelBreakdown.map((item) => item.heatScore) ?? []),
+    1,
+  );
   const selectedEnrichmentState =
     selected && enrichmentState?.hotspotId === selected.id ? enrichmentState : null;
   const searchTargets = useMemo(() => buildSearchTargets(assets), [assets]);
@@ -535,20 +738,43 @@ export function NewsMap({ dates, channels, databaseReady, initialStatus }: NewsM
 
   const hotspotMarkers = useMemo(() => {
     if (!projection) return [];
-    return visibleHotspots
+    const candidateMarkers = candidateHotspots
       .map((hotspot) => {
         const point = screenPoint(projection, mapView, hotspot.lng, hotspot.lat);
-        if (!isScreenVisible(point, size, 80)) return null;
+        if (!isScreenVisible(point, size, 18)) return null;
         const color = CHANNEL_COLORS[hotspot.channel] ?? "#0f8f7f";
-        const sizePx = Math.round(Math.min(36, Math.max(22, 18 + Math.log10(hotspot.heatScore + 1) * 4)));
-        return { hotspot, x: point![0], y: point![1], color, sizePx };
+        const heatIntensity = heatIntensityFor(hotspot.heatScore, hotspotHeatScale.low, hotspotHeatScale.high);
+        const sizePx = markerSizeForHeat(hotspot.heatScore, hotspotHeatScale.low, hotspotHeatScale.high);
+        const ringRadius = sizePx / 2 + 5;
+        const segments = channelSegments(hotspot.channelBreakdown, hotspot.heatScore, ringRadius);
+        const label = hotspot.channel.slice(0, 1);
+        const channelSummary = hotspot.channelBreakdown
+          .slice(0, 4)
+          .map((item) => `${item.channel}${Math.round((item.heatScore / Math.max(hotspot.heatScore, 1)) * 100)}%`)
+          .join("、");
+        const markerKey = `${hotspot.dataDate}-${hotspot.regionKey}`;
+        return {
+          hotspot,
+          x: point![0],
+          y: point![1],
+          color,
+          sizePx,
+          label,
+          ringRadius,
+          segments,
+          channelSummary,
+          heatIntensity,
+          collisionRadius: sizePx / 2 + 6 + heatIntensity * 2,
+          selected: markerKey === selectedRegionKey,
+        };
       })
       .filter((item): item is NonNullable<typeof item> => item !== null);
-  }, [mapView, projection, size, visibleHotspots]);
+    return declutterHotspotMarkers(candidateMarkers, mapView.k);
+  }, [candidateHotspots, hotspotHeatScale, mapView, projection, selectedRegionKey, size]);
 
   const setMapView = useCallback(
     (next: MapView) => {
-      const clamped = clampMapView(next, sizeRef.current);
+      const clamped = clampMapView(next, sizeRef.current, mapBoundsRef.current);
       mapViewRef.current = clamped;
       pendingMapViewRef.current = clamped;
       if (mapFrameRef.current !== null) return;
@@ -562,6 +788,11 @@ export function NewsMap({ dates, channels, databaseReady, initialStatus }: NewsM
     },
     [],
   );
+
+  useEffect(() => {
+    mapBoundsRef.current = mapContentBounds;
+    if (mapContentBounds) setMapView(mapViewRef.current);
+  }, [mapContentBounds, setMapView]);
 
   useEffect(() => {
     return () => {
@@ -715,8 +946,17 @@ export function NewsMap({ dates, channels, databaseReady, initialStatus }: NewsM
   useEffect(() => {
     if (!mapReady || initialLoadRef.current) return;
     initialLoadRef.current = true;
+    previousViewportRef.current = viewportKey(projectionRef.current, mapViewRef.current, sizeRef.current);
     loadWorkspace("full");
   }, [loadWorkspace, mapReady]);
+
+  useEffect(() => {
+    if (!databaseReady || !mapReady || !initialLoadRef.current) return;
+    const key = viewportKey(projectionRef.current, mapViewRef.current, sizeRef.current);
+    if (!key || key === previousViewportRef.current) return;
+    previousViewportRef.current = key;
+    scheduleHotspotLoad();
+  }, [databaseReady, mapReady, mapView, scheduleHotspotLoad, size]);
 
   useEffect(() => {
     if (!databaseReady) return;
@@ -738,34 +978,31 @@ export function NewsMap({ dates, channels, databaseReady, initialStatus }: NewsM
   }, [databaseReady, filters, loadWorkspace]);
 
   function zoomToPoint(lng: number, lat: number, zoom: number) {
-    const point = projectionRef.current?.([lng, lat]);
-    const currentSize = sizeRef.current;
-    if (!point || currentSize.width <= 0 || currentSize.height <= 0) return;
+    const point = projection?.([lng, lat]);
+    if (!point || size.width <= 0 || size.height <= 0) return;
     setMapView({
       k: clamp(zoom, MAP_VIEW_MIN_ZOOM, MAP_VIEW_MAX_ZOOM),
-      x: currentSize.width / 2 - point[0] * zoom,
-      y: currentSize.height / 2 - point[1] * zoom,
+      x: size.width / 2 - point[0] * zoom,
+      y: size.height / 2 - point[1] * zoom,
     });
   }
 
   function fitFeature(feature: Feature<Geometry, MapProperties>, maxZoom: number) {
-    const currentProjection = projectionRef.current;
-    const currentSize = sizeRef.current;
-    if (!currentProjection || currentSize.width <= 0 || currentSize.height <= 0) return;
-    const localPath = geoPath(currentProjection);
+    if (!projection || size.width <= 0 || size.height <= 0) return;
+    const localPath = geoPath(projection);
     const [[x0, y0], [x1, y1]] = localPath.bounds(feature as GeoPermissibleObjects);
     const dx = Math.max(1, x1 - x0);
     const dy = Math.max(1, y1 - y0);
     const padding = 88;
     const k = clamp(
-      Math.min((currentSize.width - padding) / dx, (currentSize.height - padding) / dy),
+      Math.min((size.width - padding) / dx, (size.height - padding) / dy),
       1.15,
       maxZoom,
     );
     setMapView({
       k,
-      x: currentSize.width / 2 - ((x0 + x1) / 2) * k,
-      y: currentSize.height / 2 - ((y0 + y1) / 2) * k,
+      x: size.width / 2 - ((x0 + x1) / 2) * k,
+      y: size.height / 2 - ((y0 + y1) / 2) * k,
     });
   }
 
@@ -887,7 +1124,15 @@ export function NewsMap({ dates, channels, databaseReady, initialStatus }: NewsM
     }
   }
 
-  async function openHotspot(id: number) {
+  function openRegionHotspot(hotspot: MapHotspot) {
+    setSelectedRegion(hotspot);
+    setSelected(null);
+    setExpandedStoryId(null);
+    setEnrichmentState(null);
+    setPanelView("detail");
+  }
+
+  async function openChannelHotspot(id: number) {
     const hotspot = await fetchHotspotDetail(id);
     setSelected(hotspot);
     setExpandedStoryId(hotspot?.storyGroups[0]?.id ?? null);
@@ -904,8 +1149,7 @@ export function NewsMap({ dates, channels, databaseReady, initialStatus }: NewsM
   function locateRankingItem(item: MapHotspot) {
     preserveRankingUntilRef.current = Date.now() + 1200;
     zoomToPoint(item.lng, item.lat, 10.5);
-    setPanelView("detail");
-    void openHotspot(item.id);
+    openRegionHotspot(item);
     scheduleHotspotLoad();
   }
 
@@ -1037,7 +1281,7 @@ export function NewsMap({ dates, channels, databaseReady, initialStatus }: NewsM
           <button
             type="button"
             className={panelView === "detail" ? "active" : ""}
-            disabled={!selected}
+            disabled={!selectedRegion && !selected}
             onClick={() => setPanelView("detail")}
           >
             热点详情
@@ -1056,7 +1300,7 @@ export function NewsMap({ dates, channels, databaseReady, initialStatus }: NewsM
               {ranking.map((item) => (
                 <button key={item.id} type="button" className="ranking-item" onClick={() => locateRankingItem(item)}>
                   <span>{item.regionName}</span>
-                  <strong>{item.channel}</strong>
+                  <strong>{item.channelCount > 1 ? `${item.channel}主导 · ${item.channelCount}频道` : item.channel}</strong>
                   <small>
                     {item.eventCount} 个事件 · {item.sourceCount} 个来源
                   </small>
@@ -1068,9 +1312,55 @@ export function NewsMap({ dates, channels, databaseReady, initialStatus }: NewsM
               {ranking.length === 0 ? <div className="empty-detail">当前筛选下暂无热点排行。</div> : null}
             </div>
           </div>
-        ) : selected ? (
+        ) : selectedRegion ? (
           <article className="detail-panel">
-            <div className="detail-hero">
+            <div className="detail-hero region-detail-hero">
+              <p className="eyebrow">地区综合热点</p>
+              <h2>{selectedRegion.regionName}</h2>
+              <p className="detail-summary">{selectedRegion.summary}</p>
+              <div className="detail-metrics">
+                <span>综合热度 {selectedRegion.heatScore.toFixed(1)}</span>
+                <span>{selectedRegion.eventCount} 个事件</span>
+                <span>{selectedRegion.mentionCount} 次提及</span>
+                <span>{selectedRegion.sourceCount} 个来源</span>
+                <span>主频道 {selectedRegion.channel}</span>
+                <span>{selectedRegion.channelCount} 个频道</span>
+              </div>
+            </div>
+
+            <section className="detail-section">
+              <p className="eyebrow">频道构成</p>
+              <div className="channel-breakdown-list">
+                {selectedRegion.channelBreakdown.map((item) => {
+                  const color = CHANNEL_COLORS[item.channel] ?? "#0f8f7f";
+                  return (
+                    <button
+                      key={item.hotspotId}
+                      type="button"
+                      className={`channel-breakdown-item ${selected?.id === item.hotspotId ? "active" : ""}`}
+                      style={{ "--channel-color": color } as React.CSSProperties}
+                      onClick={() => void openChannelHotspot(item.hotspotId)}
+                    >
+                      <span>
+                        <i />
+                        {item.channel}
+                      </span>
+                      <strong>{item.heatScore.toFixed(1)}</strong>
+                      <small>
+                        {item.eventCount} 个事件 · {item.mentionCount} 次提及 · {item.sourceCount} 个来源
+                      </small>
+                      <em className="heat-bar">
+                        <b style={{ width: `${Math.max(8, Math.round((item.heatScore / selectedRegionMaxChannelHeat) * 100))}%` }} />
+                      </em>
+                    </button>
+                  );
+                })}
+              </div>
+            </section>
+
+            {selected ? (
+              <>
+            <div className="detail-hero channel-detail-hero">
               <p className="eyebrow">热点详情</p>
               <h2>{selected.explanation.title}</h2>
               <p className="detail-summary">{selected.explanation.whatHappened}</p>
@@ -1236,6 +1526,10 @@ export function NewsMap({ dates, channels, databaseReady, initialStatus }: NewsM
                 ))}
               </div>
             </section>
+              </>
+            ) : (
+              <div className="empty-detail channel-detail-empty">选择一个频道查看代表来源、故事组和来源质量。</div>
+            )}
           </article>
         ) : (
           <div className="empty-detail">点击地图热点或排行项查看基础详情。</div>
@@ -1272,27 +1566,51 @@ export function NewsMap({ dates, channels, databaseReady, initialStatus }: NewsM
               ))}
             </g>
             <g className="hotspot-layer">
-              {hotspotMarkers.map(({ hotspot, x, y, color, sizePx }) => (
+              {hotspotMarkers.map(({ hotspot, x, y, color, sizePx, label, ringRadius, segments, channelSummary, heatIntensity, selected }) => (
                 <g
-                  key={hotspot.id}
+                  key={`${hotspot.dataDate}-${hotspot.regionKey}`}
                   role="button"
                   tabIndex={0}
-                  className="hotspot-dot"
+                  aria-label={`${hotspot.regionName} 地区综合热点，${hotspot.channel}主导，覆盖 ${hotspot.channelCount} 个频道。${channelSummary}`}
+                  className={`hotspot-dot ${selected ? "selected" : ""}`}
                   transform={`translate(${x} ${y})`}
                   style={{ "--marker-color": color, "--marker-size": `${sizePx}px` } as React.CSSProperties}
                   onPointerDown={(event) => event.stopPropagation()}
-                  onClick={() => openHotspot(hotspot.id)}
+                  onClick={() => openRegionHotspot(hotspot)}
                   onKeyDown={(event) => {
                     if (event.key === "Enter" || event.key === " ") {
                       event.preventDefault();
-                      void openHotspot(hotspot.id);
+                      openRegionHotspot(hotspot);
                     }
                   }}
                 >
                   <title>{hotspot.summary}</title>
-                  <circle className="hotspot-halo" r={sizePx / 2 + 7} />
+                  <circle className="hotspot-hit-area" r={Math.max(28, ringRadius + 8)} />
+                  <circle
+                    className="hotspot-heat-glow"
+                    r={ringRadius + 9 + heatIntensity * 18}
+                    opacity={0.12 + heatIntensity * 0.2}
+                  />
+                  <circle className="hotspot-halo" r={ringRadius + 6} />
+                  {segments.map((segment) =>
+                    segment.path ? (
+                      <path
+                        key={segment.channel}
+                        className="hotspot-channel-ring"
+                        d={segment.path}
+                        stroke={segment.color}
+                      />
+                    ) : (
+                      <circle
+                        key={segment.channel}
+                        className="hotspot-channel-ring"
+                        r={ringRadius}
+                        stroke={segment.color}
+                      />
+                    ),
+                  )}
                   <circle className="hotspot-core" r={sizePx / 2} />
-                  <text>{hotspot.channel.slice(0, 1)}</text>
+                  <text>{label}</text>
                 </g>
               ))}
             </g>

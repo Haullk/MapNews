@@ -293,6 +293,15 @@ button {
   background: #f5fbf9;
 }
 
+.region-detail-hero {
+  border-color: #d3deea;
+  background: #f7faff;
+}
+
+.channel-detail-hero {
+  margin-top: 14px;
+}
+
 .detail-panel h2 {
   margin: 8px 0 14px;
   font-size: 17px;
@@ -377,6 +386,69 @@ button {
   padding-top: 14px;
   margin-top: 14px;
   border-top: 1px solid var(--line);
+}
+
+.channel-breakdown-list {
+  display: grid;
+  gap: 8px;
+}
+
+.channel-breakdown-item {
+  --channel-color: var(--accent);
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 5px 10px;
+  width: 100%;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+  color: var(--ink);
+  text-align: left;
+}
+
+.channel-breakdown-item.active,
+.channel-breakdown-item:hover {
+  border-color: color-mix(in srgb, var(--channel-color) 55%, var(--line));
+  background: color-mix(in srgb, var(--channel-color) 8%, #fff);
+}
+
+.channel-breakdown-item span {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  font-weight: 800;
+}
+
+.channel-breakdown-item span i {
+  flex: 0 0 auto;
+  width: 9px;
+  height: 9px;
+  border-radius: 999px;
+  background: var(--channel-color);
+}
+
+.channel-breakdown-item strong {
+  color: var(--accent-strong);
+  font-size: 13px;
+}
+
+.channel-breakdown-item small {
+  grid-column: 1 / -1;
+  color: var(--muted);
+}
+
+.channel-breakdown-item .heat-bar {
+  grid-column: 1 / -1;
+}
+
+.channel-breakdown-item .heat-bar b {
+  background: var(--channel-color);
+}
+
+.channel-detail-empty {
+  margin-top: 14px;
 }
 
 .compact-list {
@@ -586,10 +658,28 @@ button {
   cursor: pointer;
 }
 
+.hotspot-dot .hotspot-hit-area {
+  fill: transparent;
+  pointer-events: all;
+}
+
+.hotspot-dot .hotspot-heat-glow {
+  fill: var(--marker-color);
+  filter: blur(7px);
+  pointer-events: none;
+}
+
 .hotspot-dot .hotspot-halo {
   fill: color-mix(in srgb, var(--marker-color) 22%, transparent);
   stroke: color-mix(in srgb, var(--marker-color) 28%, transparent);
   stroke-width: 1;
+}
+
+.hotspot-dot .hotspot-channel-ring {
+  fill: none;
+  stroke-linecap: butt;
+  stroke-width: 4.5;
+  pointer-events: none;
 }
 
 .hotspot-dot .hotspot-core {
@@ -611,6 +701,14 @@ button {
 .hotspot-dot:hover .hotspot-core {
   stroke-width: 3;
   filter: drop-shadow(0 4px 10px rgba(29, 36, 51, 0.2));
+}
+
+.hotspot-dot.selected .hotspot-channel-ring {
+  stroke-width: 5.5;
+}
+
+.hotspot-dot.selected .hotspot-core {
+  stroke-width: 3;
 }
 
 .map-overlay {
