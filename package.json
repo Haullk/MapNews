@@ -11,12 +11,15 @@
   },
   "dependencies": {
     "@types/pg": "^8.11.10",
+    "d3-geo": "^3.1.1",
     "next": "^15.1.0",
     "pg": "^8.13.1",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },
   "devDependencies": {
+    "@types/d3-geo": "^3.1.0",
+    "@types/geojson": "^7946.0.16",
     "@types/node": "^22.10.2",
     "@types/react": "^19.0.1",
     "@types/react-dom": "^19.0.2",

@@ -1,11 +1,20 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  type PointerEvent as ReactPointerEvent,
+  type WheelEvent as ReactWheelEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { geoBounds, geoCentroid, geoMercator, geoPath } from "d3-geo";
+import type { GeoPermissibleObjects, GeoProjection } from "d3-geo";
+import type { Feature, FeatureCollection, Geometry, Point } from "geojson";
 import type { DataStatus, DailyBrief, HotspotDetail, MapHotspot } from "@/lib/hotspots";
 
 interface NewsMapProps {
-  mapKey: string;
-  mapSecurityCode: string;
   dates: string[];
   channels: readonly string[];
   databaseReady: boolean;
@@ -18,6 +27,56 @@ interface Filters {
   region: string;
 }
 
+interface MapProperties {
+  id?: string;
+  name?: string;
+  name_ascii?: string;
+  name_en?: string;
+  name_zh?: string;
+  admin?: string;
+  country?: string;
+  country_code?: string;
+  continent?: string;
+  region?: string;
+  latitude?: number;
+  longitude?: number;
+  population?: number;
+  labelrank?: number;
+  min_zoom?: number;
+  capital?: number;
+  worldcity?: number;
+  megacity?: number;
+}
+
+interface MapAssets {
+  countries: FeatureCollection<Geometry, MapProperties>;
+  regions: FeatureCollection<Geometry, MapProperties>;
+  places: FeatureCollection<Point, MapProperties>;
+}
+
+interface MapSize {
+  width: number;
+  height: number;
+}
+
+interface MapView {
+  x: number;
+  y: number;
+  k: number;
+}
+
+interface SearchTarget {
+  id: string;
+  type: "country" | "region" | "place";
+  label: string;
+  queryName: string;
+  keys: string[];
+  feature?: Feature<Geometry, MapProperties>;
+  lng?: number;
+  lat?: number;
+  population?: number;
+}
+
 type HotspotsPayload = { hotspots: MapHotspot[]; status: { message: string; ok: boolean } };
 type LoadMode = "full" | "hotspots" | "viewport";
 type PanelView = "ranking" | "detail";
@@ -27,9 +86,13 @@ type EnrichmentState = {
   message: string;
 };
 
-const GCJ_PI = Math.PI;
-const GCJ_A = 6378245.0;
-const GCJ_EE = 0.00669342162296594323;
+const MAP_VIEW_MIN_ZOOM = 1;
+const MAP_VIEW_MAX_ZOOM = 40;
+const REGION_BOUNDARY_ZOOM = 2.8;
+const COUNTRY_LABEL_MAX_ZOOM = 3.1;
+const REGION_LABEL_MIN_ZOOM = 3.4;
+const REGION_LABEL_MAX_ZOOM = 6.4;
+const PLACE_LABEL_ZOOM = 5.1;
 
 const CHANNEL_COLORS: Record<string, string> = {
   国际: "#0f8f7f",
@@ -40,43 +103,56 @@ const CHANNEL_COLORS: Record<string, string> = {
   社会: "#52606d",
 };
 
-function isOutsideChina(lng: number, lat: number) {
-  return lng < 72.004 || lng > 137.8347 || lat < 0.8293 || lat > 55.8271;
+const COUNTRY_ALIASES: Record<string, string[]> = {
+  CHN: ["中国", "中华人民共和国", "China"],
+  USA: ["美国", "美利坚合众国", "United States", "United States of America"],
+  GBR: ["英国", "United Kingdom", "Great Britain"],
+  RUS: ["俄罗斯", "Russia", "Russian Federation"],
+  JPN: ["日本", "Japan"],
+  KOR: ["韩国", "South Korea", "Republic of Korea"],
+  PRK: ["朝鲜", "North Korea"],
+  FRA: ["法国", "France"],
+  DEU: ["德国", "Germany"],
+  IND: ["印度", "India"],
+};
+
+const COUNTRY_QUERY_NAMES: Record<string, string> = {
+  CHN: "China",
+  USA: "United States",
+  GBR: "United Kingdom",
+  RUS: "Russia",
+  JPN: "Japan",
+  KOR: "South Korea",
+  PRK: "North Korea",
+  FRA: "France",
+  DEU: "Germany",
+  IND: "India",
+};
+
+function normalizeSearchText(value: string) {
+  return value.trim().toLowerCase().replace(/\s+/g, " ");
 }
 
-function transformLat(lng: number, lat: number) {
-  let ret = -100 + 2 * lng + 3 * lat + 0.2 * lat * lat + 0.1 * lng * lat + 0.2 * Math.sqrt(Math.abs(lng));
-  ret += ((20 * Math.sin(6 * lng * GCJ_PI) + 20 * Math.sin(2 * lng * GCJ_PI)) * 2) / 3;
-  ret += ((20 * Math.sin(lat * GCJ_PI) + 40 * Math.sin((lat / 3) * GCJ_PI)) * 2) / 3;
-  ret += ((160 * Math.sin((lat / 12) * GCJ_PI) + 320 * Math.sin((lat * GCJ_PI) / 30)) * 2) / 3;
-  return ret;
+function uniqueStrings(values: Array<string | undefined | null>) {
+  return Array.from(new Set(values.filter((value): value is string => Boolean(value && value.trim()))));
 }
 
-function transformLng(lng: number, lat: number) {
-  let ret = 300 + lng + 2 * lat + 0.1 * lng * lng + 0.1 * lng * lat + 0.1 * Math.sqrt(Math.abs(lng));
-  ret += ((20 * Math.sin(6 * lng * GCJ_PI) + 20 * Math.sin(2 * lng * GCJ_PI)) * 2) / 3;
-  ret += ((20 * Math.sin(lng * GCJ_PI) + 40 * Math.sin((lng / 3) * GCJ_PI)) * 2) / 3;
-  ret += ((150 * Math.sin((lng / 12) * GCJ_PI) + 300 * Math.sin((lng / 30) * GCJ_PI)) * 2) / 3;
-  return ret;
+function labelFor(properties: MapProperties) {
+  return properties.name_zh || properties.name_en || properties.name_ascii || properties.name || "未命名地区";
 }
 
-function wgs84ToGcj02(lng: number, lat: number): [number, number] {
-  if (isOutsideChina(lng, lat)) return [lng, lat];
-  let dLat = transformLat(lng - 105, lat - 35);
-  let dLng = transformLng(lng - 105, lat - 35);
-  const radLat = (lat / 180) * GCJ_PI;
-  let magic = Math.sin(radLat);
-  magic = 1 - GCJ_EE * magic * magic;
-  const sqrtMagic = Math.sqrt(magic);
-  dLat = (dLat * 180) / (((GCJ_A * (1 - GCJ_EE)) / (magic * sqrtMagic)) * GCJ_PI);
-  dLng = (dLng * 180) / ((GCJ_A / sqrtMagic) * Math.cos(radLat) * GCJ_PI);
-  return [lng + dLng, lat + dLat];
+function queryNameFor(properties: MapProperties) {
+  const countryCode = properties.id || properties.country_code || "";
+  return COUNTRY_QUERY_NAMES[countryCode] || properties.name_en || properties.name_ascii || properties.name || labelFor(properties);
 }
 
-function gcj02ToWgs84(lng: number, lat: number): [number, number] {
-  if (isOutsideChina(lng, lat)) return [lng, lat];
-  const [gcjLng, gcjLat] = wgs84ToGcj02(lng, lat);
-  return [lng * 2 - gcjLng, lat * 2 - gcjLat];
+function numberValue(value: unknown) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function clamp(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value));
 }
 
 function hotspotNeedsEnrichment(hotspot: HotspotDetail) {
@@ -88,20 +164,234 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-export function NewsMap({ mapKey, mapSecurityCode, dates, channels, databaseReady, initialStatus }: NewsMapProps) {
+async function fetchMapJson<T extends FeatureCollection<Geometry, MapProperties>>(url: string): Promise<T> {
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`地图资产加载失败：${url}`);
+  return (await response.json()) as T;
+}
+
+function screenPoint(
+  projection: GeoProjection | null,
+  view: MapView,
+  lng: number,
+  lat: number,
+): [number, number] | null {
+  const point = projection?.([lng, lat]);
+  if (!point) return null;
+  return [point[0] * view.k + view.x, point[1] * view.k + view.y];
+}
+
+function screenToLonLat(
+  projection: GeoProjection | null,
+  view: MapView,
+  x: number,
+  y: number,
+): [number, number] | null {
+  const invert = projection?.invert;
+  if (!invert) return null;
+  const point = invert([(x - view.x) / view.k, (y - view.y) / view.k]);
+  if (!point || !Number.isFinite(point[0]) || !Number.isFinite(point[1])) return null;
+  return [clamp(point[0], -180, 180), clamp(point[1], -90, 90)];
+}
+
+function bboxFromView(projection: GeoProjection | null, view: MapView, size: MapSize) {
+  if (!projection || size.width <= 0 || size.height <= 0) return null;
+  const corners = [
+    screenToLonLat(projection, view, 0, 0),
+    screenToLonLat(projection, view, size.width, 0),
+    screenToLonLat(projection, view, size.width, size.height),
+    screenToLonLat(projection, view, 0, size.height),
+  ].filter((point): point is [number, number] => point !== null);
+  if (corners.length === 0) return null;
+  const lons = corners.map((point) => point[0]);
+  const lats = corners.map((point) => point[1]);
+  return {
+    west: Math.max(-180, Math.min(...lons)),
+    south: Math.max(-90, Math.min(...lats)),
+    east: Math.min(180, Math.max(...lons)),
+    north: Math.min(90, Math.max(...lats)),
+  };
+}
+
+function clampMapView(view: MapView, size: MapSize) {
+  const k = clamp(view.k, MAP_VIEW_MIN_ZOOM, MAP_VIEW_MAX_ZOOM);
+  const limit = Math.max(size.width, size.height) * k;
+  return {
+    k,
+    x: clamp(view.x, -limit, limit),
+    y: clamp(view.y, -limit, limit),
+  };
+}
+
+function featureKey(feature: Feature<Geometry, MapProperties>, prefix: string, index: number) {
+  return `${prefix}-${feature.properties?.id ?? feature.properties?.name_en ?? feature.properties?.name ?? index}`;
+}
+
+function featureLabelPosition(
+  projection: GeoProjection | null,
+  view: MapView,
+  feature: Feature<Geometry, MapProperties>,
+) {
+  try {
+    const [lng, lat] = geoCentroid(feature as GeoPermissibleObjects);
+    return screenPoint(projection, view, lng, lat);
+  } catch {
+    return null;
+  }
+}
+
+function isScreenVisible(point: [number, number] | null, size: MapSize, margin = 40) {
+  if (!point) return false;
+  return point[0] >= -margin && point[0] <= size.width + margin && point[1] >= -margin && point[1] <= size.height + margin;
+}
+
+function isProjectedBoundsVisible(bounds: [[number, number], [number, number]], view: MapView, size: MapSize, margin = 80) {
+  const x0 = bounds[0][0] * view.k + view.x;
+  const y0 = bounds[0][1] * view.k + view.y;
+  const x1 = bounds[1][0] * view.k + view.x;
+  const y1 = bounds[1][1] * view.k + view.y;
+  return Math.max(x0, x1) >= -margin && Math.min(x0, x1) <= size.width + margin &&
+    Math.max(y0, y1) >= -margin && Math.min(y0, y1) <= size.height + margin;
+}
+
+function keepSeparatedLabels<T extends { point: [number, number] | null }>(items: T[], minDistance: number, limit: number) {
+  const kept: T[] = [];
+  const minDistanceSquared = minDistance * minDistance;
+  for (const item of items) {
+    const point = item.point;
+    if (!point) continue;
+    const overlaps = kept.some((keptItem) => {
+      const keptPoint = keptItem.point;
+      if (!keptPoint) return false;
+      const dx = point[0] - keptPoint[0];
+      const dy = point[1] - keptPoint[1];
+      return dx * dx + dy * dy < minDistanceSquared;
+    });
+    if (!overlaps) kept.push(item);
+    if (kept.length >= limit) break;
+  }
+  return kept;
+}
+
+function buildSearchTargets(assets: MapAssets | null): SearchTarget[] {
+  if (!assets) return [];
+  const countries = assets.countries.features.map((feature, index): SearchTarget => {
+    const properties = feature.properties ?? {};
+    const countryCode = properties.id || "";
+    const aliases = COUNTRY_ALIASES[countryCode] ?? [];
+    return {
+      id: `country-${countryCode || index}`,
+      type: "country",
+      label: labelFor(properties),
+      queryName: queryNameFor(properties),
+      keys: uniqueStrings([
+        properties.name,
+        properties.name_en,
+        properties.name_zh,
+        properties.admin,
+        COUNTRY_QUERY_NAMES[countryCode],
+        ...aliases,
+      ]),
+      feature,
+      population: numberValue(properties.population),
+    };
+  });
+
+  const regions = assets.regions.features.map((feature, index): SearchTarget => {
+    const properties = feature.properties ?? {};
+    return {
+      id: `region-${properties.id ?? index}`,
+      type: "region",
+      label: labelFor(properties),
+      queryName: properties.name_en || properties.name || labelFor(properties),
+      keys: uniqueStrings([
+        properties.name,
+        properties.name_en,
+        properties.name_zh,
+        properties.country,
+        `${properties.name_en ?? properties.name ?? ""}, ${properties.country ?? ""}`,
+        `${properties.name_zh ?? ""}${properties.country ?? ""}`,
+      ]),
+      feature,
+      lng: properties.longitude,
+      lat: properties.latitude,
+    };
+  });
+
+  const places = assets.places.features.map((feature, index): SearchTarget => {
+    const properties = feature.properties ?? {};
+    const coordinates = feature.geometry?.coordinates;
+    return {
+      id: `place-${properties.name_ascii ?? properties.name ?? index}-${properties.country_code ?? ""}`,
+      type: "place",
+      label: labelFor(properties),
+      queryName: properties.name_en || properties.name_ascii || properties.name || labelFor(properties),
+      keys: uniqueStrings([
+        properties.name,
+        properties.name_ascii,
+        properties.name_en,
+        properties.name_zh,
+        properties.country,
+        properties.region,
+        `${properties.name_en ?? properties.name_ascii ?? properties.name ?? ""}, ${properties.country ?? ""}`,
+        `${properties.name_zh ?? ""}${properties.country ?? ""}`,
+      ]),
+      lng: coordinates?.[0] ?? properties.longitude,
+      lat: coordinates?.[1] ?? properties.latitude,
+      population: numberValue(properties.population),
+    };
+  });
+
+  return [...countries, ...regions, ...places];
+}
+
+function findSearchTarget(query: string, targets: SearchTarget[]) {
+  const normalizedQuery = normalizeSearchText(query);
+  if (!normalizedQuery) return null;
+  const typeWeight = { country: 30, region: 20, place: 10 };
+  let best: { target: SearchTarget; score: number } | null = null;
+
+  for (const target of targets) {
+    let score = 0;
+    for (const key of target.keys) {
+      const normalizedKey = normalizeSearchText(key);
+      if (!normalizedKey) continue;
+      if (normalizedKey === normalizedQuery) score = Math.max(score, 100);
+      else if (normalizedKey.startsWith(normalizedQuery)) score = Math.max(score, 72);
+      else if (normalizedKey.includes(normalizedQuery)) score = Math.max(score, 45);
+    }
+    if (score === 0) continue;
+    score += typeWeight[target.type] + Math.min(Math.log10((target.population ?? 0) + 1), 8);
+    if (!best || score > best.score) best = { target, score };
+  }
+
+  return best?.target ?? null;
+}
+
+export function NewsMap({ dates, channels, databaseReady, initialStatus }: NewsMapProps) {
   const mapEl = useRef<HTMLDivElement | null>(null);
-  const mapRef = useRef<AMapMap | null>(null);
-  const markersRef = useRef<AMapMarker[]>([]);
   const abortRef = useRef<AbortController | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const requestIdRef = useRef(0);
   const preserveRankingUntilRef = useRef(0);
   const enrichmentPollRef = useRef<Map<number, boolean>>(new Map());
+  const initialLoadRef = useRef(false);
   const loadWorkspaceRef = useRef<(mode?: LoadMode) => void>(() => undefined);
   const briefCacheRef = useRef<Map<string, DailyBrief>>(new Map());
   const statusCacheRef = useRef<DataStatus | null>(initialStatus);
   const previousFiltersRef = useRef<Filters | null>(null);
-  const [mapReady, setMapReady] = useState(false);
+  const projectionRef = useRef<GeoProjection | null>(null);
+  const sizeRef = useRef<MapSize>({ width: 0, height: 0 });
+  const mapViewRef = useRef<MapView>({ x: 0, y: 0, k: 1 });
+  const pendingMapViewRef = useRef<MapView | null>(null);
+  const mapFrameRef = useRef<number | null>(null);
+  const dragRef = useRef<{ pointerId: number; x: number; y: number; moved: boolean } | null>(null);
+
+  const [assets, setAssets] = useState<MapAssets | null>(null);
+  const [mapLoadError, setMapLoadError] = useState<string | null>(null);
+  const [size, setSize] = useState<MapSize>({ width: 0, height: 0 });
+  const [mapView, setMapViewState] = useState<MapView>({ x: 0, y: 0, k: 1 });
+  const [dragging, setDragging] = useState(false);
   const [hotspots, setHotspots] = useState<MapHotspot[]>([]);
   const [ranking, setRanking] = useState<MapHotspot[]>([]);
   const [brief, setBrief] = useState<DailyBrief | null>(null);
@@ -109,42 +399,215 @@ export function NewsMap({ mapKey, mapSecurityCode, dates, channels, databaseRead
   const [expandedStoryId, setExpandedStoryId] = useState<number | null>(null);
   const [panelView, setPanelView] = useState<PanelView>("ranking");
   const [enrichmentState, setEnrichmentState] = useState<EnrichmentState | null>(null);
-  const [zoomLevel, setZoomLevel] = useState(3);
   const [status, setStatus] = useState<DataStatus>(initialStatus);
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const [searchText, setSearchText] = useState("");
+  const [searchMessage, setSearchMessage] = useState<string | null>(null);
   const [filters, setFilters] = useState<Filters>({ date: dates[0] ?? "", channel: "", region: "" });
-  const canLoadMap = mapKey.trim().length > 0;
-  const visibleHotspotLimit = zoomLevel <= 3 ? 120 : zoomLevel <= 4 ? 240 : hotspots.length;
+
+  const projection = useMemo(() => {
+    if (!assets || size.width <= 0 || size.height <= 0) return null;
+    return geoMercator().fitExtent(
+      [
+        [28, 24],
+        [size.width - 28, size.height - 24],
+      ],
+      assets.countries as GeoPermissibleObjects,
+    );
+  }, [assets, size]);
+
+  const path = useMemo(() => (projection ? geoPath(projection) : null), [projection]);
+  const mapReady = Boolean(assets && projection && size.width > 0 && size.height > 0);
+  const visibleHotspotLimit = mapView.k <= 1.4 ? 120 : mapView.k <= 2.2 ? 240 : hotspots.length;
   const visibleHotspots = useMemo(() => hotspots.slice(0, visibleHotspotLimit), [hotspots, visibleHotspotLimit]);
   const maxRankingHeat = Math.max(...ranking.map((item) => item.heatScore), 1);
   const selectedEnrichmentState =
     selected && enrichmentState?.hotspotId === selected.id ? enrichmentState : null;
+  const searchTargets = useMemo(() => buildSearchTargets(assets), [assets]);
 
-  useEffect(() => {
-    if (!canLoadMap || window.AMap) return;
-    if (mapSecurityCode.trim()) {
-      window._AMapSecurityConfig = { securityJsCode: mapSecurityCode.trim() };
+  const countryPaths = useMemo(() => {
+    if (!assets || !path) return [];
+    return assets.countries.features.map((feature, index) => ({
+      key: featureKey(feature, "country", index),
+      label: labelFor(feature.properties ?? {}),
+      d: path(feature as GeoPermissibleObjects) ?? "",
+      feature,
+      labelrank: numberValue(feature.properties?.labelrank),
+    }));
+  }, [assets, path]);
+
+  const allRegionPaths = useMemo(() => {
+    if (!assets || !path) return [];
+    return assets.regions.features.map((feature, index) => {
+      const permissibleFeature = feature as GeoPermissibleObjects;
+      return {
+        key: featureKey(feature, "region", index),
+        label: labelFor(feature.properties ?? {}),
+        d: path(permissibleFeature) ?? "",
+        bounds: path.bounds(permissibleFeature) as [[number, number], [number, number]],
+        feature,
+        labelrank: numberValue(feature.properties?.labelrank),
+      };
+    });
+  }, [assets, path]);
+
+  const regionPaths = useMemo(() => {
+    if (mapView.k < REGION_BOUNDARY_ZOOM) return [];
+    return allRegionPaths.filter((item) => isProjectedBoundsVisible(item.bounds, mapView, size));
+  }, [allRegionPaths, mapView, size]);
+
+  const mapLabels = useMemo(() => {
+    if (!assets || !projection) return [];
+    const labels: Array<{ key: string; label: string; x: number; y: number; kind: "country" | "region" | "place" }> = [];
+
+    if (mapView.k < COUNTRY_LABEL_MAX_ZOOM) {
+      const countryLabelRank = mapView.k < 1.7 ? 2 : 3;
+      const countryLimit = mapView.k < 1.7 ? 18 : 28;
+      const countryCandidates = countryPaths
+        .filter((item) => item.labelrank <= countryLabelRank)
+        .map((item) => ({
+          key: `label-${item.key}`,
+          label: item.label,
+          point: featureLabelPosition(projection, mapView, item.feature),
+          rank: item.labelrank,
+        }))
+        .filter((item) => isScreenVisible(item.point, size))
+        .sort((a, b) => a.rank - b.rank);
+      for (const item of keepSeparatedLabels(countryCandidates, 78, countryLimit)) {
+        labels.push({ key: item.key, label: item.label, x: item.point![0], y: item.point![1], kind: "country" });
+      }
     }
-    window.initAmap = () => setMapReady(true);
-    const script = document.createElement("script");
-    script.src = `https://webapi.amap.com/maps?v=2.0&key=${encodeURIComponent(mapKey)}&callback=initAmap`;
-    script.async = true;
-    script.onerror = () => setMessage("地图加载失败，请检查高德 Web 端 Key、服务平台和域名白名单。");
-    document.head.appendChild(script);
-    return () => {
-      window.initAmap = undefined;
-    };
-  }, [canLoadMap, mapKey, mapSecurityCode]);
+
+    if (mapView.k >= REGION_LABEL_MIN_ZOOM && mapView.k < REGION_LABEL_MAX_ZOOM) {
+      const regionCandidates = assets.regions.features
+        .filter((feature) => numberValue(feature.properties?.labelrank) <= 3)
+        .map((feature, index) => {
+          const point = featureLabelPosition(projection, mapView, feature);
+          return {
+            key: `region-label-${feature.properties?.id ?? index}`,
+            label: labelFor(feature.properties ?? {}),
+            point,
+            rank: numberValue(feature.properties?.labelrank),
+          };
+        })
+        .filter((item) => isScreenVisible(item.point, size, 20))
+        .sort((a, b) => a.rank - b.rank);
+      for (const item of keepSeparatedLabels(regionCandidates, 62, 24)) {
+        labels.push({ key: item.key, label: item.label, x: item.point![0], y: item.point![1], kind: "region" });
+      }
+    }
+
+    if (mapView.k >= PLACE_LABEL_ZOOM) {
+      const placeLimit = mapView.k >= 12 ? 75 : mapView.k >= 8 ? 52 : 30;
+      const placeMinPopulation = mapView.k >= 12 ? 500_000 : mapView.k >= 8 ? 1_000_000 : 4_000_000;
+      const placeCandidates = assets.places.features
+        .filter((feature) => {
+          const properties = feature.properties ?? {};
+          return (
+            numberValue(properties.capital) === 1 ||
+            numberValue(properties.worldcity) === 1 ||
+            numberValue(properties.megacity) === 1 ||
+            numberValue(properties.population) >= placeMinPopulation
+          );
+        })
+        .map((feature, index) => {
+          const [lng, lat] = feature.geometry.coordinates;
+          const countryCode = feature.properties?.country_code ?? "unknown";
+          const name = feature.properties?.name_ascii ?? feature.properties?.name_en ?? feature.properties?.name ?? index;
+          const point = screenPoint(projection, mapView, lng, lat);
+          return {
+            key: `place-label-${countryCode}-${name}-${lng.toFixed(3)}-${lat.toFixed(3)}-${index}`,
+            label: labelFor(feature.properties ?? {}),
+            point,
+            population: numberValue(feature.properties?.population),
+          };
+        })
+        .filter((item) => isScreenVisible(item.point, size, 18))
+        .sort((a, b) => b.population - a.population);
+      for (const item of keepSeparatedLabels(placeCandidates, mapView.k >= 10 ? 48 : 58, placeLimit)) {
+        labels.push({ key: item.key, label: item.label, x: item.point![0], y: item.point![1], kind: "place" });
+      }
+    }
+
+    return labels;
+  }, [assets, countryPaths, mapView, projection, size]);
+
+  const hotspotMarkers = useMemo(() => {
+    if (!projection) return [];
+    return visibleHotspots
+      .map((hotspot) => {
+        const point = screenPoint(projection, mapView, hotspot.lng, hotspot.lat);
+        if (!isScreenVisible(point, size, 80)) return null;
+        const color = CHANNEL_COLORS[hotspot.channel] ?? "#0f8f7f";
+        const sizePx = Math.round(Math.min(36, Math.max(22, 18 + Math.log10(hotspot.heatScore + 1) * 4)));
+        return { hotspot, x: point![0], y: point![1], color, sizePx };
+      })
+      .filter((item): item is NonNullable<typeof item> => item !== null);
+  }, [mapView, projection, size, visibleHotspots]);
+
+  const setMapView = useCallback(
+    (next: MapView) => {
+      const clamped = clampMapView(next, sizeRef.current);
+      mapViewRef.current = clamped;
+      pendingMapViewRef.current = clamped;
+      if (mapFrameRef.current !== null) return;
+      mapFrameRef.current = window.requestAnimationFrame(() => {
+        mapFrameRef.current = null;
+        const pending = pendingMapViewRef.current;
+        if (!pending) return;
+        pendingMapViewRef.current = null;
+        setMapViewState(pending);
+      });
+    },
+    [],
+  );
 
   useEffect(() => {
-    if (window.AMap) setMapReady(true);
+    return () => {
+      if (mapFrameRef.current !== null) {
+        window.cancelAnimationFrame(mapFrameRef.current);
+      }
+    };
   }, []);
 
-  const clearMarkers = useCallback(() => {
-    markersRef.current.forEach((marker) => marker.setMap(null));
-    markersRef.current = [];
+  useEffect(() => {
+    let active = true;
+    void Promise.all([
+      fetchMapJson<FeatureCollection<Geometry, MapProperties>>("/maps/countries.geojson"),
+      fetchMapJson<FeatureCollection<Geometry, MapProperties>>("/maps/regions.geojson"),
+      fetchMapJson<FeatureCollection<Point, MapProperties>>("/maps/places.geojson"),
+    ])
+      .then(([countries, regions, places]) => {
+        if (!active) return;
+        setAssets({ countries, regions, places });
+        setMapLoadError(null);
+      })
+      .catch((error) => {
+        if (!active) return;
+        setMapLoadError(error instanceof Error ? error.message : "本地地图资产加载失败。");
+      });
+    return () => {
+      active = false;
+    };
   }, []);
+
+  useEffect(() => {
+    if (!mapEl.current) return;
+    const observer = new ResizeObserver((entries) => {
+      const rect = entries[0]?.contentRect;
+      if (!rect) return;
+      const nextSize = { width: Math.round(rect.width), height: Math.round(rect.height) };
+      sizeRef.current = nextSize;
+      setSize(nextSize);
+    });
+    observer.observe(mapEl.current);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    projectionRef.current = projection;
+  }, [projection]);
 
   const queryParams = useCallback(
     (withBounds: boolean) => {
@@ -152,17 +615,14 @@ export function NewsMap({ mapKey, mapSecurityCode, dates, channels, databaseRead
       if (filters.date) params.set("date", filters.date);
       if (filters.channel) params.set("channel", filters.channel);
       if (filters.region) params.set("region", filters.region);
-      const map = mapRef.current;
-      if (withBounds && map) {
-        const bounds = map.getBounds();
-        const ne = bounds.getNorthEast();
-        const sw = bounds.getSouthWest();
-        const [swLng, swLat] = gcj02ToWgs84(sw.getLng(), sw.getLat());
-        const [neLng, neLat] = gcj02ToWgs84(ne.getLng(), ne.getLat());
-        params.set("west", String(Math.min(swLng, neLng)));
-        params.set("south", String(Math.min(swLat, neLat)));
-        params.set("east", String(Math.max(swLng, neLng)));
-        params.set("north", String(Math.max(swLat, neLat)));
+      if (withBounds) {
+        const bbox = bboxFromView(projectionRef.current, mapViewRef.current, sizeRef.current);
+        if (bbox && bbox.east > bbox.west && bbox.north > bbox.south) {
+          params.set("west", String(bbox.west));
+          params.set("south", String(bbox.south));
+          params.set("east", String(bbox.east));
+          params.set("north", String(bbox.north));
+        }
       }
       return params;
     },
@@ -176,7 +636,7 @@ export function NewsMap({ mapKey, mapSecurityCode, dates, channels, databaseRead
   }, [filters.date]);
 
   const loadWorkspace = useCallback(async (mode: LoadMode = "full") => {
-    if (!databaseReady) return;
+    if (!databaseReady || !mapReady) return;
     abortRef.current?.abort();
     const requestId = requestIdRef.current + 1;
     requestIdRef.current = requestId;
@@ -184,7 +644,7 @@ export function NewsMap({ mapKey, mapSecurityCode, dates, channels, databaseRead
     abortRef.current = controller;
     setLoading(true);
     try {
-      const hotspotResponse = await fetch(`/api/hotspots?${queryParams(Boolean(mapRef.current)).toString()}`, {
+      const hotspotResponse = await fetch(`/api/hotspots?${queryParams(true).toString()}`, {
         cache: "no-store",
         signal: controller.signal,
       });
@@ -236,7 +696,7 @@ export function NewsMap({ mapKey, mapSecurityCode, dates, channels, databaseRead
         setLoading(false);
       }
     }
-  }, [briefParams, databaseReady, filters.date, queryParams]);
+  }, [briefParams, databaseReady, filters.date, mapReady, queryParams]);
 
   useEffect(() => {
     loadWorkspaceRef.current = loadWorkspace;
@@ -252,34 +712,11 @@ export function NewsMap({ mapKey, mapSecurityCode, dates, channels, databaseRead
     }, 350);
   }, []);
 
-  const updateZoomLevel = useCallback(() => {
-    if (mapRef.current) setZoomLevel(mapRef.current.getZoom());
-  }, []);
-
   useEffect(() => {
-    if (!mapReady || !mapEl.current || mapRef.current || !window.AMap) return;
-    mapRef.current = new window.AMap.Map(mapEl.current, {
-      center: [105, 30],
-      zoom: 3,
-      viewMode: "2D",
-      mapStyle: "amap://styles/normal",
-    });
-    window.__mapnewsMap = mapRef.current;
-    setZoomLevel(mapRef.current.getZoom());
-    mapRef.current.on("complete", () => {
-      updateZoomLevel();
-      loadWorkspaceRef.current("full");
-    });
-    mapRef.current.on("moveend", () => {
-      updateZoomLevel();
-      scheduleHotspotLoad();
-    });
-    mapRef.current.on("zoomend", () => {
-      updateZoomLevel();
-      scheduleHotspotLoad();
-    });
+    if (!mapReady || initialLoadRef.current) return;
+    initialLoadRef.current = true;
     loadWorkspace("full");
-  }, [loadWorkspace, mapReady, scheduleHotspotLoad, updateZoomLevel]);
+  }, [loadWorkspace, mapReady]);
 
   useEffect(() => {
     if (!databaseReady) return;
@@ -300,24 +737,94 @@ export function NewsMap({ mapKey, mapSecurityCode, dates, channels, databaseRead
     };
   }, [databaseReady, filters, loadWorkspace]);
 
-  useEffect(() => {
-    if (!mapRef.current || !window.AMap) return;
-    clearMarkers();
-    markersRef.current = visibleHotspots.map((hotspot) => {
-      const color = CHANNEL_COLORS[hotspot.channel] ?? "#0f8f7f";
-      const size = Math.round(Math.min(36, Math.max(22, 18 + Math.log10(hotspot.heatScore + 1) * 4)));
-      const position = wgs84ToGcj02(hotspot.lng, hotspot.lat);
-      const marker = new window.AMap!.Marker({
-        map: mapRef.current!,
-        position,
-        title: hotspot.summary,
-        content: `<span class="hotspot-marker" style="--marker-color: ${color}; --marker-size: ${size}px">${hotspot.channel.slice(0, 1)}</span>`,
-      });
-      marker.on("click", () => openHotspot(hotspot.id));
-      return marker;
+  function zoomToPoint(lng: number, lat: number, zoom: number) {
+    const point = projectionRef.current?.([lng, lat]);
+    const currentSize = sizeRef.current;
+    if (!point || currentSize.width <= 0 || currentSize.height <= 0) return;
+    setMapView({
+      k: clamp(zoom, MAP_VIEW_MIN_ZOOM, MAP_VIEW_MAX_ZOOM),
+      x: currentSize.width / 2 - point[0] * zoom,
+      y: currentSize.height / 2 - point[1] * zoom,
     });
-    return clearMarkers;
-  }, [clearMarkers, visibleHotspots]);
+  }
+
+  function fitFeature(feature: Feature<Geometry, MapProperties>, maxZoom: number) {
+    const currentProjection = projectionRef.current;
+    const currentSize = sizeRef.current;
+    if (!currentProjection || currentSize.width <= 0 || currentSize.height <= 0) return;
+    const localPath = geoPath(currentProjection);
+    const [[x0, y0], [x1, y1]] = localPath.bounds(feature as GeoPermissibleObjects);
+    const dx = Math.max(1, x1 - x0);
+    const dy = Math.max(1, y1 - y0);
+    const padding = 88;
+    const k = clamp(
+      Math.min((currentSize.width - padding) / dx, (currentSize.height - padding) / dy),
+      1.15,
+      maxZoom,
+    );
+    setMapView({
+      k,
+      x: currentSize.width / 2 - ((x0 + x1) / 2) * k,
+      y: currentSize.height / 2 - ((y0 + y1) / 2) * k,
+    });
+  }
+
+  function focusSearchTarget(target: SearchTarget) {
+    if (target.feature) {
+      fitFeature(target.feature, target.type === "country" ? 4.2 : 9.5);
+      return;
+    }
+    if (typeof target.lng === "number" && typeof target.lat === "number") {
+      zoomToPoint(target.lng, target.lat, target.type === "place" ? 12 : 9);
+    }
+  }
+
+  function handleWheel(event: ReactWheelEvent<SVGSVGElement>) {
+    event.preventDefault();
+    if (!mapReady) return;
+    const rect = event.currentTarget.getBoundingClientRect();
+    const mouseX = event.clientX - rect.left;
+    const mouseY = event.clientY - rect.top;
+    const current = mapViewRef.current;
+    const wheelPixels = event.deltaMode === 1 ? event.deltaY * 16 : event.deltaMode === 2 ? event.deltaY * 240 : event.deltaY;
+    const zoomFactor = Math.exp(-wheelPixels * 0.0018);
+    const nextZoom = clamp(current.k * zoomFactor, MAP_VIEW_MIN_ZOOM, MAP_VIEW_MAX_ZOOM);
+    const localX = (mouseX - current.x) / current.k;
+    const localY = (mouseY - current.y) / current.k;
+    setMapView({
+      k: nextZoom,
+      x: mouseX - localX * nextZoom,
+      y: mouseY - localY * nextZoom,
+    });
+    scheduleHotspotLoad();
+  }
+
+  function handlePointerDown(event: ReactPointerEvent<SVGSVGElement>) {
+    if (event.button !== 0 || !mapReady) return;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    dragRef.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY, moved: false };
+    setDragging(true);
+  }
+
+  function handlePointerMove(event: ReactPointerEvent<SVGSVGElement>) {
+    const drag = dragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    const dx = event.clientX - drag.x;
+    const dy = event.clientY - drag.y;
+    if (Math.abs(dx) + Math.abs(dy) > 2) drag.moved = true;
+    drag.x = event.clientX;
+    drag.y = event.clientY;
+    const current = mapViewRef.current;
+    setMapView({ ...current, x: current.x + dx, y: current.y + dy });
+  }
+
+  function handlePointerUp(event: ReactPointerEvent<SVGSVGElement>) {
+    const drag = dragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    dragRef.current = null;
+    setDragging(false);
+    if (drag.moved) scheduleHotspotLoad();
+  }
 
   async function fetchHotspotDetail(id: number) {
     const response = await fetch(`/api/hotspots/${id}`, { cache: "no-store" });
@@ -396,15 +903,35 @@ export function NewsMap({ mapKey, mapSecurityCode, dates, channels, databaseRead
 
   function locateRankingItem(item: MapHotspot) {
     preserveRankingUntilRef.current = Date.now() + 1200;
-    mapRef.current?.setZoomAndCenter(6, wgs84ToGcj02(item.lng, item.lat));
-    setZoomLevel(6);
+    zoomToPoint(item.lng, item.lat, 10.5);
     setPanelView("detail");
-    openHotspot(item.id);
+    void openHotspot(item.id);
+    scheduleHotspotLoad();
   }
 
   function searchRegion() {
-    if (!filters.region.trim()) return;
-    loadWorkspace("hotspots");
+    const rawSearch = searchText.trim();
+    if (!rawSearch) {
+      setFilters((prev) => ({ ...prev, region: "" }));
+      setSearchMessage(null);
+      setMessage("已清除地区筛选。");
+      scheduleHotspotLoad();
+      return;
+    }
+
+    const target = findSearchTarget(rawSearch, searchTargets);
+    if (!target) {
+      setSearchMessage("未找到地区，可尝试英文/中文地名。");
+      return;
+    }
+
+    focusSearchTarget(target);
+    setSearchMessage(`已定位到 ${target.label}`);
+    setFilters((prev) => {
+      const next = { ...prev, region: target.queryName };
+      if (prev.region === next.region) scheduleHotspotLoad();
+      return next;
+    });
   }
 
   function flagText(flag: string) {
@@ -419,6 +946,13 @@ export function NewsMap({ mapKey, mapSecurityCode, dates, channels, databaseRead
     };
     return labels[flag] ?? flag;
   }
+
+  const baseMapTransform = `translate(${mapView.x} ${mapView.y}) scale(${mapView.k})`;
+  const mapOverlayText = mapLoadError
+    ? mapLoadError
+    : loading
+      ? "正在加载热点..."
+      : `${message ?? status.message} · 当前地图显示 ${hotspotMarkers.length}/${hotspots.length} 个热点`;
 
   return (
     <section className="map-workspace">
@@ -459,14 +993,21 @@ export function NewsMap({ mapKey, mapSecurityCode, dates, channels, databaseRead
             地区搜索
             <span className="search-row">
               <input
-                value={filters.region}
-                onChange={(event) => setFilters((prev) => ({ ...prev, region: event.target.value }))}
-                placeholder="国家、城市或地区"
+                value={searchText}
+                onChange={(event) => setSearchText(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    searchRegion();
+                  }
+                }}
+                placeholder="国家、省州、城市"
               />
               <button type="button" onClick={searchRegion}>
                 搜索
               </button>
             </span>
+            {searchMessage ? <span className="map-search-message">{searchMessage}</span> : null}
           </label>
         </div>
 
@@ -508,7 +1049,7 @@ export function NewsMap({ mapKey, mapSecurityCode, dates, channels, databaseRead
             <div className="section-heading">
               <p className="eyebrow">热点排行</p>
               <span>
-                地图显示 {visibleHotspots.length}/{hotspots.length}
+                地图显示 {hotspotMarkers.length}/{hotspots.length}
               </span>
             </div>
             <div className="ranking-list">
@@ -701,13 +1242,66 @@ export function NewsMap({ mapKey, mapSecurityCode, dates, channels, databaseRead
         )}
       </aside>
 
-      <div className="map-stage">
-        {canLoadMap ? <div ref={mapEl} className="map-canvas" /> : <div className="map-placeholder">请配置高德地图 Key。</div>}
-        <div className="map-overlay">
-          {loading
-            ? "正在加载热点..."
-            : `${message ?? status.message} · 当前地图显示 ${visibleHotspots.length}/${hotspots.length} 个热点`}
-        </div>
+      <div className="map-stage" ref={mapEl}>
+        {mapReady ? (
+          <svg
+            className={`map-canvas ${dragging ? "dragging" : ""}`}
+            role="img"
+            aria-label="全球新闻热点地图"
+            viewBox={`0 0 ${size.width} ${size.height}`}
+            onWheel={handleWheel}
+            onPointerDown={handlePointerDown}
+            onPointerMove={handlePointerMove}
+            onPointerUp={handlePointerUp}
+            onPointerCancel={handlePointerUp}
+          >
+            <rect className="map-ocean" width={size.width} height={size.height} />
+            <g className="map-base-layer" transform={baseMapTransform}>
+              {countryPaths.map((item) => (
+                <path key={item.key} className="map-country" d={item.d} />
+              ))}
+              {regionPaths.map((item) => (
+                <path key={item.key} className="map-region" d={item.d} />
+              ))}
+            </g>
+            <g className="map-label-layer" aria-hidden="true">
+              {mapLabels.map((label) => (
+                <text key={label.key} className={`map-label ${label.kind}`} x={label.x} y={label.y}>
+                  {label.label}
+                </text>
+              ))}
+            </g>
+            <g className="hotspot-layer">
+              {hotspotMarkers.map(({ hotspot, x, y, color, sizePx }) => (
+                <g
+                  key={hotspot.id}
+                  role="button"
+                  tabIndex={0}
+                  className="hotspot-dot"
+                  transform={`translate(${x} ${y})`}
+                  style={{ "--marker-color": color, "--marker-size": `${sizePx}px` } as React.CSSProperties}
+                  onPointerDown={(event) => event.stopPropagation()}
+                  onClick={() => openHotspot(hotspot.id)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" || event.key === " ") {
+                      event.preventDefault();
+                      void openHotspot(hotspot.id);
+                    }
+                  }}
+                >
+                  <title>{hotspot.summary}</title>
+                  <circle className="hotspot-halo" r={sizePx / 2 + 7} />
+                  <circle className="hotspot-core" r={sizePx / 2} />
+                  <text>{hotspot.channel.slice(0, 1)}</text>
+                </g>
+              ))}
+            </g>
+          </svg>
+        ) : (
+          <div className="map-placeholder">{mapLoadError ?? "正在加载本地地图。"}</div>
+        )}
+        <div className="map-overlay">{mapOverlayText}</div>
+        <div className="map-attribution">Natural Earth · 本地 GeoJSON</div>
       </div>
     </section>
   );

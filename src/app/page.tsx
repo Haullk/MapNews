@@ -3,8 +3,6 @@ import { getInitialWorkspaceData } from "@/lib/hotspots";
 
 export default async function Home() {
   const workspace = await getInitialWorkspaceData();
-  const mapKey = process.env.NEXT_PUBLIC_AMAP_KEY ?? "";
-  const mapSecurityCode = process.env.NEXT_PUBLIC_AMAP_SECURITY_JS_CODE ?? "";
 
   return (
     <main className="app-shell">
@@ -21,8 +19,6 @@ export default async function Home() {
       </section>
 
       <NewsMap
-        mapKey={mapKey}
-        mapSecurityCode={mapSecurityCode}
         dates={workspace.dates}
         channels={workspace.channels}
         databaseReady={workspace.databaseReady}

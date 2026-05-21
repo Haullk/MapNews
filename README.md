@@ -1,11 +1,11 @@
 # MapNews
 
-MapNews 是一个面向中国大陆访问的地图新闻 MVP：Python 后台每天导入 GDELT Events，PostgreSQL + PostGIS 存储事件，Next.js 前台直接在服务端查询数据库并用高德地图展示全球事件点。
+MapNews 是一个面向中国大陆访问的地图新闻 MVP：Python 后台每天导入 GDELT Events，PostgreSQL + PostGIS 存储事件，Next.js 前台直接在服务端查询数据库并用本地 GeoJSON 地图展示全球事件点。
 
 ## 技术栈
 
 - 前台：Next.js + React + TypeScript
-- 地图：高德地图 JS API
+- 地图：本地 Natural Earth GeoJSON + SVG/D3
 - 后台：Python 批处理脚本
 - 数据库：PostgreSQL + PostGIS
 - 部署：腾讯云轻量云/CVM，Nginx + systemd，不使用 Docker
@@ -60,7 +60,7 @@ npm run dev
 
 1. 在 CVM 安装 Node.js、Python 3.11、PostgreSQL、PostGIS、Nginx。
 2. 创建系统用户 `mapnews`，把项目放到 `/opt/mapnews/app`。
-3. 在 `/opt/mapnews/app/.env` 配置 `DATABASE_URL`、`GDELT_DATABASE_URL` 和 `NEXT_PUBLIC_AMAP_KEY`。
+3. 在 `/opt/mapnews/app/.env` 配置 `DATABASE_URL` 和 `GDELT_DATABASE_URL`。
 4. 执行 `npm ci && npm run build`，并安装 Python 依赖。
 5. 执行 `python -m worker.init_db` 初始化 schema。
 6. 复制 `deploy/systemd/*.service` 和 `*.timer` 到 `/etc/systemd/system/`，启用：
