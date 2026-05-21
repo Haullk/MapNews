@@ -43,11 +43,77 @@ export interface HotspotSource {
   title: string | null;
 }
 
+export interface HotspotTopic {
+  name: string;
+  count: number;
+}
+
+export interface HotspotEntity {
+  name: string;
+  type?: string;
+  count: number;
+}
+
+export interface StoryGroupSource {
+  url: string;
+  domain: string | null;
+  title: string | null;
+  publishedAt: string | null;
+  rank: number;
+  isDuplicate: boolean;
+  duplicateOfUrl: string | null;
+  qualityFlags: string[];
+}
+
+export interface StoryGroup {
+  id: number;
+  title: string;
+  summary: string;
+  eventCount: number;
+  mentionCount: number;
+  sourceCount: number;
+  sourceDomainCount: number;
+  firstSeenAt: string | null;
+  lastSeenAt: string | null;
+  topics: HotspotTopic[];
+  entities: HotspotEntity[];
+  qualityFlags: string[];
+  sources: StoryGroupSource[];
+}
+
+export interface SourceQuality {
+  enhanced: boolean;
+  sourceCount: number;
+  candidateSourceCount: number;
+  fetchedSourceCount: number;
+  sourceDomainCount: number;
+  storyCount: number;
+  duplicateSourceCount: number;
+  oldSourceCount: number;
+  missingTitleCount: number;
+  gkgCoveredSourceCount: number;
+  firstMentionAt: string | null;
+  latestMentionAt: string | null;
+}
+
+export interface HotspotExplanation {
+  title: string;
+  whatHappened: string;
+  importanceReasons: string[];
+  sourceQuality: SourceQuality;
+  uncertaintyWarnings: string[];
+  topics: HotspotTopic[];
+  entities: HotspotEntity[];
+  generatedAt: string | null;
+}
+
 export interface HotspotDetail extends MapHotspot {
   articleCount: number;
   domainCount: number;
   updatedAt: string;
   representativeSources: HotspotSource[];
+  explanation: HotspotExplanation;
+  storyGroups: StoryGroup[];
 }
 
 export interface DailyBrief {
@@ -73,6 +139,58 @@ export interface DataStatus {
 
 function numberValue(value: unknown) {
   return value === null || value === undefined ? 0 : Number(value);
+}
+
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+}
+
+function topicArray(value: unknown): HotspotTopic[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => {
+      if (!item || typeof item !== "object") return null;
+      const record = item as Record<string, unknown>;
+      return {
+        name: String(record.name ?? ""),
+        count: numberValue(record.count),
+      };
+    })
+    .filter((item): item is HotspotTopic => item !== null && item.name.length > 0);
+}
+
+function entityArray(value: unknown): HotspotEntity[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => {
+      if (!item || typeof item !== "object") return null;
+      const record = item as Record<string, unknown>;
+      const entity: HotspotEntity = {
+        name: String(record.name ?? ""),
+        count: numberValue(record.count),
+      };
+      if (typeof record.type === "string") entity.type = record.type;
+      return entity;
+    })
+    .filter((item): item is HotspotEntity => item !== null && item.name.length > 0);
+}
+
+function sourceQuality(value: unknown, fallback: { sourceCount: number; domainCount: number }): SourceQuality {
+  const record = value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+  return {
+    enhanced: Boolean(record.enhanced),
+    sourceCount: numberValue(record.sourceCount ?? fallback.sourceCount),
+    candidateSourceCount: numberValue(record.candidateSourceCount),
+    fetchedSourceCount: numberValue(record.fetchedSourceCount),
+    sourceDomainCount: numberValue(record.sourceDomainCount ?? fallback.domainCount),
+    storyCount: numberValue(record.storyCount),
+    duplicateSourceCount: numberValue(record.duplicateSourceCount),
+    oldSourceCount: numberValue(record.oldSourceCount),
+    missingTitleCount: numberValue(record.missingTitleCount),
+    gkgCoveredSourceCount: numberValue(record.gkgCoveredSourceCount),
+    firstMentionAt: typeof record.firstMentionAt === "string" ? record.firstMentionAt : null,
+    latestMentionAt: typeof record.latestMentionAt === "string" ? record.latestMentionAt : null,
+  };
 }
 
 function hotspotFromRow(row: {
@@ -205,7 +323,7 @@ export async function queryMapHotspots(filters: HotspotFilters) {
 
 export async function getHotspotDetail(id: number): Promise<HotspotDetail | null> {
   const pool = getPool();
-  const [hotspotResult, sourceResult] = await Promise.all([
+  const [hotspotResult, sourceResult, explanationResult, storyResult] = await Promise.all([
     pool.query<Parameters<typeof hotspotFromRow>[0] & {
       article_count: number | string;
       source_domain_count: number | string;
@@ -222,17 +340,125 @@ export async function getHotspotDetail(id: number): Promise<HotspotDetail | null
     ),
     pool.query<{ source_url: string; source_domain: string | null; title: string | null }>(
       `
-        select source_url, source_domain, title
-        from map_hotspot_sources
-        where hotspot_id = $1
-        order by source_rank asc
+        select s.source_url, s.source_domain, coalesce(s.title, a.title) as title
+        from map_hotspot_sources s
+        left join article_metadata a on a.url = s.source_url
+        where s.hotspot_id = $1
+        order by s.source_rank asc
         limit 8
+      `,
+      [id],
+    ),
+    pool.query<{
+      title: string;
+      what_happened: string;
+      importance_reasons: unknown;
+      source_quality: unknown;
+      uncertainty_warnings: unknown;
+      topics: unknown;
+      entities: unknown;
+      generated_at: string;
+    }>(
+      `
+        select title, what_happened, importance_reasons, source_quality,
+               uncertainty_warnings, topics, entities, generated_at::text
+        from hotspot_explanations
+        where hotspot_id = $1
+      `,
+      [id],
+    ),
+    pool.query<{
+      id: number;
+      representative_title: string;
+      summary: string;
+      event_count: number | string;
+      mention_count: number | string;
+      source_count: number | string;
+      source_domain_count: number | string;
+      first_seen_at: string | null;
+      last_seen_at: string | null;
+      topics: unknown;
+      entities: unknown;
+      quality_flags: unknown;
+    }>(
+      `
+        select id, representative_title, summary, event_count, mention_count, source_count,
+               source_domain_count, first_seen_at::text, last_seen_at::text, topics, entities, quality_flags
+        from hotspot_story_groups
+        where hotspot_id = $1
+        order by source_count desc, mention_count desc, id asc
+        limit 5
       `,
       [id],
     ),
   ]);
   const row = hotspotResult.rows[0];
   if (!row) return null;
+  const storyIds = storyResult.rows.map((story) => Number(story.id));
+  const storySources =
+    storyIds.length === 0
+      ? []
+      : (
+          await pool.query<{
+            story_group_id: number;
+            source_url: string;
+            source_domain: string | null;
+            title: string | null;
+            published_at: string | null;
+            source_rank: number | string;
+            is_duplicate: boolean;
+            duplicate_of_url: string | null;
+            quality_flags: unknown;
+          }>(
+            `
+              select story_group_id, source_url, source_domain, title, published_at::text,
+                     source_rank, is_duplicate, duplicate_of_url, quality_flags
+              from story_group_sources
+              where story_group_id = any($1::bigint[])
+              order by story_group_id, source_rank asc
+            `,
+            [storyIds],
+          )
+        ).rows;
+  const sourcesByStory = new Map<number, StoryGroupSource[]>();
+  for (const source of storySources) {
+    const storyId = Number(source.story_group_id);
+    const sources = sourcesByStory.get(storyId) ?? [];
+    sources.push({
+      url: source.source_url,
+      domain: source.source_domain,
+      title: source.title,
+      publishedAt: source.published_at,
+      rank: numberValue(source.source_rank),
+      isDuplicate: source.is_duplicate,
+      duplicateOfUrl: source.duplicate_of_url,
+      qualityFlags: stringArray(source.quality_flags),
+    });
+    sourcesByStory.set(storyId, sources);
+  }
+  const fallbackQuality = { sourceCount: numberValue(row.source_count), domainCount: numberValue(row.source_domain_count) };
+  const explanationRow = explanationResult.rows[0];
+  const explanation: HotspotExplanation = explanationRow
+    ? {
+        title: explanationRow.title,
+        whatHappened: explanationRow.what_happened,
+        importanceReasons: stringArray(explanationRow.importance_reasons),
+        sourceQuality: sourceQuality(explanationRow.source_quality, fallbackQuality),
+        uncertaintyWarnings: stringArray(explanationRow.uncertainty_warnings),
+        topics: topicArray(explanationRow.topics),
+        entities: entityArray(explanationRow.entities),
+        generatedAt: explanationRow.generated_at,
+      }
+    : {
+        title: row.summary,
+        whatHappened: row.summary,
+        importanceReasons: ["当前热点主要依据事件数量、报道提及和来源数量进入地图展示。"],
+        sourceQuality: { ...sourceQuality(null, fallbackQuality), enhanced: false },
+        uncertaintyWarnings: ["当前仅有结构化事件数据，正在补充来源元数据和故事组。"],
+        topics: [],
+        entities: [],
+        generatedAt: null,
+      };
   return {
     ...hotspotFromRow(row),
     articleCount: numberValue(row.article_count),
@@ -242,6 +468,22 @@ export async function getHotspotDetail(id: number): Promise<HotspotDetail | null
       url: source.source_url,
       domain: source.source_domain,
       title: source.title,
+    })),
+    explanation,
+    storyGroups: storyResult.rows.map((story) => ({
+      id: Number(story.id),
+      title: story.representative_title,
+      summary: story.summary,
+      eventCount: numberValue(story.event_count),
+      mentionCount: numberValue(story.mention_count),
+      sourceCount: numberValue(story.source_count),
+      sourceDomainCount: numberValue(story.source_domain_count),
+      firstSeenAt: story.first_seen_at,
+      lastSeenAt: story.last_seen_at,
+      topics: topicArray(story.topics),
+      entities: entityArray(story.entities),
+      qualityFlags: stringArray(story.quality_flags),
+      sources: sourcesByStory.get(Number(story.id)) ?? [],
     })),
   };
 }

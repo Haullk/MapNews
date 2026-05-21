@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { DataStatus, DailyBrief, HotspotDetail, MapHotspot } from "@/lib/hotspots";
 
 interface NewsMapProps {
@@ -19,7 +19,17 @@ interface Filters {
 }
 
 type HotspotsPayload = { hotspots: MapHotspot[]; status: { message: string; ok: boolean } };
-type LoadMode = "full" | "hotspots";
+type LoadMode = "full" | "hotspots" | "viewport";
+type PanelView = "ranking" | "detail";
+type EnrichmentState = {
+  hotspotId: number;
+  status: "running" | "success" | "error";
+  message: string;
+};
+
+const GCJ_PI = Math.PI;
+const GCJ_A = 6378245.0;
+const GCJ_EE = 0.00669342162296594323;
 
 const CHANNEL_COLORS: Record<string, string> = {
   国际: "#0f8f7f",
@@ -30,6 +40,54 @@ const CHANNEL_COLORS: Record<string, string> = {
   社会: "#52606d",
 };
 
+function isOutsideChina(lng: number, lat: number) {
+  return lng < 72.004 || lng > 137.8347 || lat < 0.8293 || lat > 55.8271;
+}
+
+function transformLat(lng: number, lat: number) {
+  let ret = -100 + 2 * lng + 3 * lat + 0.2 * lat * lat + 0.1 * lng * lat + 0.2 * Math.sqrt(Math.abs(lng));
+  ret += ((20 * Math.sin(6 * lng * GCJ_PI) + 20 * Math.sin(2 * lng * GCJ_PI)) * 2) / 3;
+  ret += ((20 * Math.sin(lat * GCJ_PI) + 40 * Math.sin((lat / 3) * GCJ_PI)) * 2) / 3;
+  ret += ((160 * Math.sin((lat / 12) * GCJ_PI) + 320 * Math.sin((lat * GCJ_PI) / 30)) * 2) / 3;
+  return ret;
+}
+
+function transformLng(lng: number, lat: number) {
+  let ret = 300 + lng + 2 * lat + 0.1 * lng * lng + 0.1 * lng * lat + 0.1 * Math.sqrt(Math.abs(lng));
+  ret += ((20 * Math.sin(6 * lng * GCJ_PI) + 20 * Math.sin(2 * lng * GCJ_PI)) * 2) / 3;
+  ret += ((20 * Math.sin(lng * GCJ_PI) + 40 * Math.sin((lng / 3) * GCJ_PI)) * 2) / 3;
+  ret += ((150 * Math.sin((lng / 12) * GCJ_PI) + 300 * Math.sin((lng / 30) * GCJ_PI)) * 2) / 3;
+  return ret;
+}
+
+function wgs84ToGcj02(lng: number, lat: number): [number, number] {
+  if (isOutsideChina(lng, lat)) return [lng, lat];
+  let dLat = transformLat(lng - 105, lat - 35);
+  let dLng = transformLng(lng - 105, lat - 35);
+  const radLat = (lat / 180) * GCJ_PI;
+  let magic = Math.sin(radLat);
+  magic = 1 - GCJ_EE * magic * magic;
+  const sqrtMagic = Math.sqrt(magic);
+  dLat = (dLat * 180) / (((GCJ_A * (1 - GCJ_EE)) / (magic * sqrtMagic)) * GCJ_PI);
+  dLng = (dLng * 180) / ((GCJ_A / sqrtMagic) * Math.cos(radLat) * GCJ_PI);
+  return [lng + dLng, lat + dLat];
+}
+
+function gcj02ToWgs84(lng: number, lat: number): [number, number] {
+  if (isOutsideChina(lng, lat)) return [lng, lat];
+  const [gcjLng, gcjLat] = wgs84ToGcj02(lng, lat);
+  return [lng * 2 - gcjLng, lat * 2 - gcjLat];
+}
+
+function hotspotNeedsEnrichment(hotspot: HotspotDetail) {
+  const quality = hotspot.explanation.sourceQuality;
+  return !quality.enhanced || hotspot.storyGroups.length === 0 || quality.candidateSourceCount === 0;
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 export function NewsMap({ mapKey, mapSecurityCode, dates, channels, databaseReady, initialStatus }: NewsMapProps) {
   const mapEl = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<AMapMap | null>(null);
@@ -37,6 +95,8 @@ export function NewsMap({ mapKey, mapSecurityCode, dates, channels, databaseRead
   const abortRef = useRef<AbortController | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const requestIdRef = useRef(0);
+  const preserveRankingUntilRef = useRef(0);
+  const enrichmentPollRef = useRef<Map<number, boolean>>(new Map());
   const loadWorkspaceRef = useRef<(mode?: LoadMode) => void>(() => undefined);
   const briefCacheRef = useRef<Map<string, DailyBrief>>(new Map());
   const statusCacheRef = useRef<DataStatus | null>(initialStatus);
@@ -46,11 +106,20 @@ export function NewsMap({ mapKey, mapSecurityCode, dates, channels, databaseRead
   const [ranking, setRanking] = useState<MapHotspot[]>([]);
   const [brief, setBrief] = useState<DailyBrief | null>(null);
   const [selected, setSelected] = useState<HotspotDetail | null>(null);
+  const [expandedStoryId, setExpandedStoryId] = useState<number | null>(null);
+  const [panelView, setPanelView] = useState<PanelView>("ranking");
+  const [enrichmentState, setEnrichmentState] = useState<EnrichmentState | null>(null);
+  const [zoomLevel, setZoomLevel] = useState(3);
   const [status, setStatus] = useState<DataStatus>(initialStatus);
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [filters, setFilters] = useState<Filters>({ date: dates[0] ?? "", channel: "", region: "" });
   const canLoadMap = mapKey.trim().length > 0;
+  const visibleHotspotLimit = zoomLevel <= 3 ? 120 : zoomLevel <= 4 ? 240 : hotspots.length;
+  const visibleHotspots = useMemo(() => hotspots.slice(0, visibleHotspotLimit), [hotspots, visibleHotspotLimit]);
+  const maxRankingHeat = Math.max(...ranking.map((item) => item.heatScore), 1);
+  const selectedEnrichmentState =
+    selected && enrichmentState?.hotspotId === selected.id ? enrichmentState : null;
 
   useEffect(() => {
     if (!canLoadMap || window.AMap) return;
@@ -88,10 +157,12 @@ export function NewsMap({ mapKey, mapSecurityCode, dates, channels, databaseRead
         const bounds = map.getBounds();
         const ne = bounds.getNorthEast();
         const sw = bounds.getSouthWest();
-        params.set("west", String(sw.getLng()));
-        params.set("south", String(sw.getLat()));
-        params.set("east", String(ne.getLng()));
-        params.set("north", String(ne.getLat()));
+        const [swLng, swLat] = gcj02ToWgs84(sw.getLng(), sw.getLat());
+        const [neLng, neLat] = gcj02ToWgs84(ne.getLng(), ne.getLat());
+        params.set("west", String(Math.min(swLng, neLng)));
+        params.set("south", String(Math.min(swLat, neLat)));
+        params.set("east", String(Math.max(swLng, neLng)));
+        params.set("north", String(Math.max(swLat, neLat)));
       }
       return params;
     },
@@ -123,10 +194,12 @@ export function NewsMap({ mapKey, mapSecurityCode, dates, channels, databaseRead
         throw new Error(hotspotPayload.status.message);
       }
       setHotspots(hotspotPayload.hotspots);
-      setRanking(hotspotPayload.hotspots.slice(0, 20));
+      if (mode !== "viewport") {
+        setRanking(hotspotPayload.hotspots.slice(0, 20));
+      }
       setMessage(hotspotPayload.status.message);
 
-      if (mode === "hotspots") return;
+      if (mode === "hotspots" || mode === "viewport") return;
 
       const briefKey = filters.date || "__default__";
       const cachedBrief = briefCacheRef.current.get(briefKey);
@@ -174,8 +247,13 @@ export function NewsMap({ mapKey, mapSecurityCode, dates, channels, databaseRead
       clearTimeout(debounceRef.current);
     }
     debounceRef.current = setTimeout(() => {
-      loadWorkspaceRef.current("hotspots");
+      const mode: LoadMode = Date.now() < preserveRankingUntilRef.current ? "viewport" : "hotspots";
+      loadWorkspaceRef.current(mode);
     }, 350);
+  }, []);
+
+  const updateZoomLevel = useCallback(() => {
+    if (mapRef.current) setZoomLevel(mapRef.current.getZoom());
   }, []);
 
   useEffect(() => {
@@ -187,11 +265,21 @@ export function NewsMap({ mapKey, mapSecurityCode, dates, channels, databaseRead
       mapStyle: "amap://styles/normal",
     });
     window.__mapnewsMap = mapRef.current;
-    mapRef.current.on("complete", () => loadWorkspaceRef.current("full"));
-    mapRef.current.on("moveend", scheduleHotspotLoad);
-    mapRef.current.on("zoomend", scheduleHotspotLoad);
+    setZoomLevel(mapRef.current.getZoom());
+    mapRef.current.on("complete", () => {
+      updateZoomLevel();
+      loadWorkspaceRef.current("full");
+    });
+    mapRef.current.on("moveend", () => {
+      updateZoomLevel();
+      scheduleHotspotLoad();
+    });
+    mapRef.current.on("zoomend", () => {
+      updateZoomLevel();
+      scheduleHotspotLoad();
+    });
     loadWorkspace("full");
-  }, [loadWorkspace, mapReady, scheduleHotspotLoad]);
+  }, [loadWorkspace, mapReady, scheduleHotspotLoad, updateZoomLevel]);
 
   useEffect(() => {
     if (!databaseReady) return;
@@ -215,34 +303,121 @@ export function NewsMap({ mapKey, mapSecurityCode, dates, channels, databaseRead
   useEffect(() => {
     if (!mapRef.current || !window.AMap) return;
     clearMarkers();
-    markersRef.current = hotspots.map((hotspot) => {
+    markersRef.current = visibleHotspots.map((hotspot) => {
       const color = CHANNEL_COLORS[hotspot.channel] ?? "#0f8f7f";
+      const size = Math.round(Math.min(36, Math.max(22, 18 + Math.log10(hotspot.heatScore + 1) * 4)));
+      const position = wgs84ToGcj02(hotspot.lng, hotspot.lat);
       const marker = new window.AMap!.Marker({
         map: mapRef.current!,
-        position: [hotspot.lng, hotspot.lat],
+        position,
         title: hotspot.summary,
-        content: `<span class="hotspot-marker" style="--marker-color: ${color}">${hotspot.channel.slice(0, 1)}</span>`,
+        content: `<span class="hotspot-marker" style="--marker-color: ${color}; --marker-size: ${size}px">${hotspot.channel.slice(0, 1)}</span>`,
       });
       marker.on("click", () => openHotspot(hotspot.id));
       return marker;
     });
     return clearMarkers;
-  }, [clearMarkers, hotspots]);
+  }, [clearMarkers, visibleHotspots]);
 
-  async function openHotspot(id: number) {
+  async function fetchHotspotDetail(id: number) {
     const response = await fetch(`/api/hotspots/${id}`, { cache: "no-store" });
     const payload = (await response.json()) as { hotspot?: HotspotDetail };
-    setSelected(payload.hotspot ?? null);
+    return payload.hotspot ?? null;
+  }
+
+  async function refreshHotspotIfCurrent(id: number) {
+    const hotspot = await fetchHotspotDetail(id);
+    if (!hotspot) return null;
+    setSelected((current) => (current?.id === id ? hotspot : current));
+    setExpandedStoryId((current) => current ?? hotspot.storyGroups[0]?.id ?? null);
+    return hotspot;
+  }
+
+  async function triggerHotspotEnrichment(id: number) {
+    if (enrichmentPollRef.current.get(id)) return;
+    enrichmentPollRef.current.set(id, true);
+    setEnrichmentState({
+      hotspotId: id,
+      status: "running",
+      message: "正在补充来源元数据、故事组和主题实体。",
+    });
+    try {
+      const response = await fetch(`/api/hotspots/${id}/enrich`, { cache: "no-store", method: "POST" });
+      const payload = (await response.json()) as { status?: string; message?: string };
+      if (!response.ok) {
+        throw new Error(payload.message ?? "来源增强任务启动失败。");
+      }
+      if (payload.status === "ready") {
+        const hotspot = await refreshHotspotIfCurrent(id);
+        if (hotspot && !hotspotNeedsEnrichment(hotspot)) {
+          setEnrichmentState({ hotspotId: id, status: "success", message: "来源增强已完成。" });
+        }
+        return;
+      }
+
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        await sleep(attempt < 8 ? 1000 : 2000);
+        const hotspot = await refreshHotspotIfCurrent(id);
+        if (hotspot && !hotspotNeedsEnrichment(hotspot)) {
+          setEnrichmentState({ hotspotId: id, status: "success", message: "来源增强已完成。" });
+          return;
+        }
+      }
+
+      setEnrichmentState({
+        hotspotId: id,
+        status: "running",
+        message: "来源增强还在后台处理，稍后会自动补齐或再次点开刷新。",
+      });
+    } catch (error) {
+      setEnrichmentState({
+        hotspotId: id,
+        status: "error",
+        message: error instanceof Error ? error.message : "来源增强任务启动失败。",
+      });
+    } finally {
+      enrichmentPollRef.current.set(id, false);
+    }
+  }
+
+  async function openHotspot(id: number) {
+    const hotspot = await fetchHotspotDetail(id);
+    setSelected(hotspot);
+    setExpandedStoryId(hotspot?.storyGroups[0]?.id ?? null);
+    if (hotspot) {
+      setPanelView("detail");
+      if (hotspotNeedsEnrichment(hotspot)) {
+        void triggerHotspotEnrichment(id);
+      } else {
+        setEnrichmentState(null);
+      }
+    }
   }
 
   function locateRankingItem(item: MapHotspot) {
-    mapRef.current?.setZoomAndCenter(6, [item.lng, item.lat]);
+    preserveRankingUntilRef.current = Date.now() + 1200;
+    mapRef.current?.setZoomAndCenter(6, wgs84ToGcj02(item.lng, item.lat));
+    setZoomLevel(6);
+    setPanelView("detail");
     openHotspot(item.id);
   }
 
   function searchRegion() {
     if (!filters.region.trim()) return;
     loadWorkspace("hotspots");
+  }
+
+  function flagText(flag: string) {
+    const labels: Record<string, string> = {
+      same_title_repost: "同源转载",
+      old_article: "旧文风险",
+      missing_title: "缺少标题",
+      missing_published_at: "缺发布时间",
+      fetch_failed: "抓取失败",
+      metadata_not_fetched: "未抓取元数据",
+      gkg_missing: "主题缺失",
+    };
+    return labels[flag] ?? flag;
   }
 
   return (
@@ -310,26 +485,77 @@ export function NewsMap({ mapKey, mapSecurityCode, dates, channels, databaseRead
           </div>
         </div>
 
-        <div className="sidebar-section">
-          <p className="eyebrow">热点排行</p>
-          <div className="ranking-list">
-            {ranking.map((item) => (
-              <button key={item.id} type="button" className="ranking-item" onClick={() => locateRankingItem(item)}>
-                <span>{item.regionName}</span>
-                <strong>{item.channel}</strong>
-                <small>
-                  {item.eventCount} 个事件 · {item.sourceCount} 个来源
-                </small>
-              </button>
-            ))}
-            {ranking.length === 0 ? <div className="empty-detail">当前筛选下暂无热点排行。</div> : null}
-          </div>
+        <div className="panel-tabs" role="tablist" aria-label="侧栏视图">
+          <button
+            type="button"
+            className={panelView === "ranking" ? "active" : ""}
+            onClick={() => setPanelView("ranking")}
+          >
+            热点排行
+          </button>
+          <button
+            type="button"
+            className={panelView === "detail" ? "active" : ""}
+            disabled={!selected}
+            onClick={() => setPanelView("detail")}
+          >
+            热点详情
+          </button>
         </div>
 
-        {selected ? (
+        {panelView === "ranking" ? (
+          <div className="sidebar-section">
+            <div className="section-heading">
+              <p className="eyebrow">热点排行</p>
+              <span>
+                地图显示 {visibleHotspots.length}/{hotspots.length}
+              </span>
+            </div>
+            <div className="ranking-list">
+              {ranking.map((item) => (
+                <button key={item.id} type="button" className="ranking-item" onClick={() => locateRankingItem(item)}>
+                  <span>{item.regionName}</span>
+                  <strong>{item.channel}</strong>
+                  <small>
+                    {item.eventCount} 个事件 · {item.sourceCount} 个来源
+                  </small>
+                  <i className="heat-bar">
+                    <b style={{ width: `${Math.max(8, Math.round((item.heatScore / maxRankingHeat) * 100))}%` }} />
+                  </i>
+                </button>
+              ))}
+              {ranking.length === 0 ? <div className="empty-detail">当前筛选下暂无热点排行。</div> : null}
+            </div>
+          </div>
+        ) : selected ? (
           <article className="detail-panel">
-            <p className="eyebrow">热点详情</p>
-            <h2>{selected.summary}</h2>
+            <div className="detail-hero">
+              <p className="eyebrow">热点详情</p>
+              <h2>{selected.explanation.title}</h2>
+              <p className="detail-summary">{selected.explanation.whatHappened}</p>
+              <div className="detail-metrics">
+                <span>{selected.sourceCount} 个来源</span>
+                <span>分析 {selected.explanation.sourceQuality.candidateSourceCount} 个候选</span>
+                <span>读取 {selected.explanation.sourceQuality.fetchedSourceCount} 个代表来源</span>
+                <span>去重 {selected.explanation.sourceQuality.storyCount} 个故事</span>
+                <span>{selected.domainCount} 个域名</span>
+              </div>
+            </div>
+            {hotspotNeedsEnrichment(selected) || selectedEnrichmentState ? (
+              <div className={`enrichment-banner ${selectedEnrichmentState?.status ?? "running"}`}>
+                <strong>
+                  {selectedEnrichmentState?.status === "error"
+                    ? "来源增强失败"
+                    : selectedEnrichmentState?.status === "success"
+                      ? "来源增强完成"
+                      : "正在补充来源信息"}
+                </strong>
+                <span>
+                  {selectedEnrichmentState?.message ??
+                    "正在抓取代表来源元数据，并生成故事组、主题和参与方信息。"}
+                </span>
+              </div>
+            ) : null}
             <dl>
               <div>
                 <dt>地区</dt>
@@ -350,13 +576,125 @@ export function NewsMap({ mapKey, mapSecurityCode, dates, channels, databaseRead
                 </dd>
               </div>
             </dl>
-            <div className="source-list">
-              {selected.representativeSources.map((source) => (
-                <a key={source.url} href={source.url} target="_blank" rel="noreferrer">
-                  {source.domain ?? source.url}
-                </a>
-              ))}
-            </div>
+
+            <section className="detail-section">
+              <p className="eyebrow">为什么热</p>
+              <ul className="compact-list">
+                {selected.explanation.importanceReasons.map((reason) => (
+                  <li key={reason}>{reason}</li>
+                ))}
+              </ul>
+            </section>
+
+            <section className="detail-section">
+              <p className="eyebrow">主题与参与方</p>
+              <div className="tag-cloud">
+                {selected.explanation.topics.slice(0, 8).map((topic) => (
+                  <span key={topic.name}>{topic.name}</span>
+                ))}
+                {selected.explanation.entities.slice(0, 8).map((entity) => (
+                  <span key={`${entity.type ?? "entity"}-${entity.name}`}>{entity.name}</span>
+                ))}
+                {selected.explanation.topics.length === 0 && selected.explanation.entities.length === 0 ? (
+                  <span>暂无主题实体数据</span>
+                ) : null}
+              </div>
+            </section>
+
+            <section className="detail-section">
+              <p className="eyebrow">热点内故事组</p>
+              <div className="story-list">
+                {selected.storyGroups.map((story) => {
+                  const expanded = expandedStoryId === story.id;
+                  return (
+                    <div key={story.id} className="story-card">
+                      <button type="button" className="story-card-toggle" onClick={() => setExpandedStoryId(expanded ? null : story.id)}>
+                        <span className="story-title">{story.title}</span>
+                        <small>
+                          {story.eventCount} 个事件 · {story.sourceCount} 个来源 · {story.sourceDomainCount} 个域名
+                        </small>
+                        <span className="story-summary">{story.summary}</span>
+                        {story.qualityFlags.length ? (
+                          <span className="flag-row">
+                            {story.qualityFlags.map((flag) => (
+                              <em key={flag}>{flagText(flag)}</em>
+                            ))}
+                          </span>
+                        ) : null}
+                      </button>
+                      {expanded ? (
+                        <span className="story-sources">
+                          {story.sources.map((source) => (
+                            <a key={source.url} href={source.url} target="_blank" rel="noreferrer">
+                              {source.title || source.domain || source.url}
+                            </a>
+                          ))}
+                        </span>
+                      ) : null}
+                    </div>
+                  );
+                })}
+                {selected.storyGroups.length === 0 ? (
+                  <div className="empty-detail">
+                    {selectedEnrichmentState?.message ?? "当前仅有结构化事件数据，来源元数据和故事组仍在补充。"}
+                  </div>
+                ) : null}
+              </div>
+            </section>
+
+            <section className="detail-section">
+              <p className="eyebrow">来源质量</p>
+              <dl className="quality-grid">
+                <div>
+                  <dt>候选来源</dt>
+                  <dd>{selected.explanation.sourceQuality.candidateSourceCount}</dd>
+                </div>
+                <div>
+                  <dt>代表来源</dt>
+                  <dd>{selected.explanation.sourceQuality.fetchedSourceCount}</dd>
+                </div>
+                <div>
+                  <dt>去重故事</dt>
+                  <dd>{selected.explanation.sourceQuality.storyCount}</dd>
+                </div>
+                <div>
+                  <dt>同源转载</dt>
+                  <dd>{selected.explanation.sourceQuality.duplicateSourceCount}</dd>
+                </div>
+                <div>
+                  <dt>旧文风险</dt>
+                  <dd>{selected.explanation.sourceQuality.oldSourceCount}</dd>
+                </div>
+                <div>
+                  <dt>主题覆盖</dt>
+                  <dd>{selected.explanation.sourceQuality.gkgCoveredSourceCount}</dd>
+                </div>
+              </dl>
+            </section>
+
+            <section className="detail-section">
+              <p className="eyebrow">不确定性</p>
+              {selected.explanation.uncertaintyWarnings.length ? (
+                <ul className="compact-list">
+                  {selected.explanation.uncertaintyWarnings.map((warning) => (
+                    <li key={warning}>{warning}</li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="muted-copy">当前代表来源未发现明显数据风险。</p>
+              )}
+            </section>
+
+            <section className="detail-section">
+              <p className="eyebrow">代表来源</p>
+              <div className="source-list">
+                {selected.representativeSources.map((source) => (
+                  <a key={source.url} href={source.url} target="_blank" rel="noreferrer">
+                    {source.title || source.domain || source.url}
+                  </a>
+                ))}
+              </div>
+            </section>
           </article>
         ) : (
           <div className="empty-detail">点击地图热点或排行项查看基础详情。</div>
@@ -365,7 +703,11 @@ export function NewsMap({ mapKey, mapSecurityCode, dates, channels, databaseRead
 
       <div className="map-stage">
         {canLoadMap ? <div ref={mapEl} className="map-canvas" /> : <div className="map-placeholder">请配置高德地图 Key。</div>}
-        <div className="map-overlay">{loading ? "正在加载热点..." : message ?? status.message}</div>
+        <div className="map-overlay">
+          {loading
+            ? "正在加载热点..."
+            : `${message ?? status.message} · 当前地图显示 ${visibleHotspots.length}/${hotspots.length} 个热点`}
+        </div>
       </div>
     </section>
   );

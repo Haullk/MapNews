@@ -216,7 +216,7 @@ def insert_raw_row(
                 batch_id,
                 gdelt_file.file_name,
                 gdelt_file.timestamp,
-                row[0] or None,
+                row[4] if len(row) > 4 and row[4] else None,
                 Jsonb(row),
             ),
         )

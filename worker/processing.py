@@ -13,6 +13,7 @@ from psycopg.types.json import Jsonb
 from worker.channels import channel_for_event_code
 from worker.db import connect, load_environment
 from worker.gdelt_common import domain_from_url, parse_float, parse_int, parse_timestamp, parse_yyyymmdd
+from worker.p2_enrichment import enrich_day
 
 
 @dataclass(frozen=True)
@@ -417,12 +418,40 @@ def process_day(conn: Connection, day: date) -> dict[str, int]:
                 )
 
     write_daily_brief(conn, day, hotspots, end_at)
+    p2_stats: dict[str, int] = {"gkg_documents": 0, "hotspots": 0, "sources": 0, "stories": 0}
+    try:
+        p2_stats = enrich_day(conn, day)
+    except Exception as error:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                update gdelt_import_batches
+                set processing_status = 'partial_success',
+                    error_message = coalesce(error_message || E'\n', '') || %s
+                where import_date = %s
+                """,
+                (f"P2 enrichment failed: {error}", day),
+            )
     with conn.cursor() as cur:
         cur.execute(
-            "update gdelt_import_batches set processing_status = 'success' where import_date = %s",
+            """
+            update gdelt_import_batches
+            set processing_status = case
+              when processing_status = 'partial_success' then processing_status
+              else 'success'
+            end
+            where import_date = %s
+            """,
             (day,),
         )
-    return {"events_cleaned": len(events), "hotspots": len(hotspots)}
+    return {
+        "events_cleaned": len(events),
+        "hotspots": len(hotspots),
+        "p2_gkg_documents": p2_stats["gkg_documents"],
+        "p2_hotspots": p2_stats["hotspots"],
+        "p2_sources": p2_stats["sources"],
+        "p2_stories": p2_stats["stories"],
+    }
 
 
 def write_daily_brief(

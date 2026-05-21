@@ -173,7 +173,7 @@ create table if not exists gdelt_gkg_preserved (
 );
 
 comment on table gdelt_gkg_preserved is
-  'P1 only preserves GKG raw rows for future topic/entity/storyline work; it is intentionally not queried by the frontend.';
+  'GKG raw rows preserved for topic/entity/story-group enrichment; frontend reads only parsed P2 tables, not this raw table.';
 
 create table if not exists map_hotspots (
   id bigserial primary key,
@@ -204,8 +204,110 @@ create table if not exists map_hotspot_sources (
   source_domain text,
   title text,
   source_rank integer not null default 100,
+  event_count integer not null default 0,
+  mention_count integer not null default 0,
+  source_score numeric not null default 0,
+  first_seen_at timestamptz,
+  latest_seen_at timestamptz,
+  event_root_codes jsonb not null default '[]'::jsonb,
+  actors jsonb not null default '[]'::jsonb,
   created_at timestamptz not null default now(),
   unique (hotspot_id, source_url)
+);
+
+create table if not exists article_metadata (
+  url text primary key,
+  canonical_url text,
+  source_domain text,
+  title text,
+  description text,
+  site_name text,
+  author text,
+  published_at timestamptz,
+  language text,
+  excerpt text,
+  fetch_status text not null default 'pending' check (fetch_status in ('pending', 'success', 'failed', 'skipped')),
+  http_status integer,
+  error_message text,
+  quality_flags jsonb not null default '[]'::jsonb,
+  fetched_at timestamptz,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists gkg_documents (
+  document_identifier text primary key,
+  gkg_record_id text,
+  source_common_name text,
+  source_file_timestamp timestamptz,
+  tone numeric,
+  raw_tone text,
+  theme_count integer not null default 0,
+  entity_count integer not null default 0,
+  raw_id text,
+  parsed_at timestamptz not null default now()
+);
+
+create table if not exists gkg_themes (
+  document_identifier text not null references gkg_documents(document_identifier) on delete cascade,
+  theme text not null,
+  weight integer not null default 1,
+  primary key (document_identifier, theme)
+);
+
+create table if not exists gkg_entities (
+  document_identifier text not null references gkg_documents(document_identifier) on delete cascade,
+  entity_type text not null check (entity_type in ('person', 'organization', 'location')),
+  entity_name text not null,
+  weight integer not null default 1,
+  primary key (document_identifier, entity_type, entity_name)
+);
+
+create table if not exists hotspot_story_groups (
+  id bigserial primary key,
+  hotspot_id bigint not null references map_hotspots(id) on delete cascade,
+  story_key text not null,
+  representative_title text not null,
+  summary text not null,
+  event_count integer not null default 0,
+  mention_count integer not null default 0,
+  source_count integer not null default 0,
+  source_domain_count integer not null default 0,
+  first_seen_at timestamptz,
+  last_seen_at timestamptz,
+  topics jsonb not null default '[]'::jsonb,
+  entities jsonb not null default '[]'::jsonb,
+  quality_flags jsonb not null default '[]'::jsonb,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique (hotspot_id, story_key)
+);
+
+create table if not exists story_group_sources (
+  id bigserial primary key,
+  story_group_id bigint not null references hotspot_story_groups(id) on delete cascade,
+  source_url text not null,
+  source_domain text,
+  title text,
+  published_at timestamptz,
+  source_rank integer not null default 100,
+  is_duplicate boolean not null default false,
+  duplicate_of_url text,
+  quality_flags jsonb not null default '[]'::jsonb,
+  created_at timestamptz not null default now(),
+  unique (story_group_id, source_url)
+);
+
+create table if not exists hotspot_explanations (
+  hotspot_id bigint primary key references map_hotspots(id) on delete cascade,
+  title text not null,
+  what_happened text not null,
+  importance_reasons jsonb not null default '[]'::jsonb,
+  source_quality jsonb not null default '{}'::jsonb,
+  uncertainty_warnings jsonb not null default '[]'::jsonb,
+  topics jsonb not null default '[]'::jsonb,
+  entities jsonb not null default '[]'::jsonb,
+  generated_at timestamptz not null default now()
 );
 
 create table if not exists daily_briefs (
@@ -232,7 +334,13 @@ insert into system_parameters (key, value, value_type, description) values
   ('enable_gkg_loader', 'true', 'boolean', '是否装载 GKG 原始数据'),
   ('enable_mentions_heat', 'true', 'boolean', 'Mentions 是否参与热度计算'),
   ('retention_days', '365', 'integer', '历史数据保留天数'),
-  ('empty_map_keep_last_result', 'false', 'boolean', '无数据时前台是否保留旧标记')
+  ('empty_map_keep_last_result', 'false', 'boolean', '无数据时前台是否保留旧标记'),
+  ('p2_enrichment_enabled', 'true', 'boolean', '是否启用二阶段热点解释增强任务'),
+  ('p2_top_hotspots_per_channel', '20', 'integer', '二阶段每日每频道增强的热点数量'),
+  ('p2_candidate_sources_per_hotspot', '50', 'integer', '二阶段每个热点用于故事组聚类的候选来源数量'),
+  ('p2_sources_per_hotspot', '12', 'integer', '二阶段每个热点抓取的代表来源数量'),
+  ('p2_fetch_timeout_seconds', '8', 'integer', '二阶段来源元数据抓取超时时间'),
+  ('p2_fetch_concurrency', '5', 'integer', '二阶段来源元数据并发抓取数量')
 on conflict (key) do update
 set value = excluded.value,
     value_type = excluded.value_type,
@@ -260,13 +368,24 @@ create index if not exists gdelt_mentions_raw_event_idx on gdelt_mentions_raw (g
 create index if not exists gdelt_mentions_raw_file_timestamp_idx on gdelt_mentions_raw (source_file_timestamp);
 create index if not exists gdelt_gkg_raw_batch_idx on gdelt_gkg_raw (import_batch_id);
 create index if not exists gdelt_gkg_raw_file_timestamp_idx on gdelt_gkg_raw (source_file_timestamp);
+create index if not exists gdelt_gkg_raw_document_timestamp_idx on gdelt_gkg_raw ((raw_row->>4), source_file_timestamp);
 create index if not exists gdelt_events_clean_date_channel_idx on gdelt_events_clean (event_date desc, channel);
 create index if not exists gdelt_events_clean_region_idx on gdelt_events_clean (region_key);
+create index if not exists gdelt_events_clean_hotspot_source_idx on gdelt_events_clean (event_date, region_key, channel, source_url);
 create index if not exists gdelt_events_clean_geom_idx on gdelt_events_clean using gist (geom);
 create index if not exists gdelt_mentions_clean_event_idx on gdelt_mentions_clean (global_event_id);
+create index if not exists gdelt_mentions_clean_event_source_idx on gdelt_mentions_clean (global_event_id, source_url);
 create index if not exists gdelt_mentions_clean_domain_idx on gdelt_mentions_clean (source_domain);
 create index if not exists map_hotspots_date_channel_heat_idx on map_hotspots (data_date desc, channel, heat_score desc);
 create index if not exists map_hotspots_region_idx on map_hotspots (region_key);
 create index if not exists map_hotspots_geom_idx on map_hotspots using gist (geom);
 create index if not exists map_hotspot_sources_hotspot_rank_idx on map_hotspot_sources (hotspot_id, source_rank);
+create index if not exists map_hotspot_sources_hotspot_score_idx on map_hotspot_sources (hotspot_id, source_score desc);
+create index if not exists article_metadata_domain_idx on article_metadata (source_domain);
+create index if not exists article_metadata_status_idx on article_metadata (fetch_status, fetched_at);
+create index if not exists gkg_documents_source_time_idx on gkg_documents (source_file_timestamp);
+create index if not exists gkg_themes_theme_idx on gkg_themes (theme);
+create index if not exists gkg_entities_name_idx on gkg_entities (entity_name);
+create index if not exists hotspot_story_groups_hotspot_rank_idx on hotspot_story_groups (hotspot_id, source_count desc, mention_count desc);
+create index if not exists story_group_sources_story_rank_idx on story_group_sources (story_group_id, source_rank);
 create index if not exists access_audit_logs_accessed_idx on access_audit_logs (accessed_at desc);
