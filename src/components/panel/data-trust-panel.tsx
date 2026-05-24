@@ -12,7 +12,7 @@ export function DataTrustPanel({ region, selected, formatGoldstein }: DataTrustP
       <summary>数据可信度与热度说明</summary>
       <div className="trust-content">
         <p>
-          当前地图使用 GDELT Events 结构化事件数据。它适合发现报道信号和地区态势变化，但报道量不等于真实事件量，也会受媒体覆盖、语言和来源可见度影响。
+          当前地图使用 GDELT Events 结构化事件数据。它适合发现报道信号和地区热点变化，但报道量不等于真实事件量，也会受媒体覆盖、语言和来源可见度影响。
         </p>
         <p>
           Goldstein 分值表示 GDELT 对事件合作/冲突倾向的规则评分，范围通常为 -10 到 +10；负值更偏冲突，正值更偏合作。
@@ -38,12 +38,12 @@ export function DataTrustPanel({ region, selected, formatGoldstein }: DataTrustP
             <dd>{region.sourceCount}</dd>
           </div>
           <div>
-            <dt>地区态势</dt>
+            <dt>态势评分</dt>
             <dd>{formatGoldstein(region.weightedGoldstein)}</dd>
           </div>
           <div>
             <dt>来源更新时间</dt>
-            <dd>{selected?.updatedAt ?? "尚未选择主题"}</dd>
+            <dd>{selected?.updatedAt ?? "尚未选择话题"}</dd>
           </div>
         </dl>
       </div>

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { DataStatus, DailyBrief, HotspotDetail, MapHotspot, QueryStatus } from "@/lib/hotspots";
+import type { DataStatus, HotspotDetail, MapHotspot, QueryStatus } from "@/lib/hotspots";
 
 export type LoadMode = "full" | "hotspots" | "viewport";
 type HotspotsPayload = { hotspots: MapHotspot[]; status: { message: string; ok: boolean } };
@@ -11,11 +11,9 @@ interface UseWorkspaceDataOptions {
   initialStatus: DataStatus;
   initialHotspots: MapHotspot[];
   initialHotspotStatus: QueryStatus;
-  initialBrief: DailyBrief | null;
   hasInitialWorkspacePayload: boolean;
   viewportKey: string | null;
   queryParams: (withBounds: boolean) => URLSearchParams;
-  briefParams: () => URLSearchParams;
 }
 
 export function useWorkspaceData({
@@ -25,11 +23,9 @@ export function useWorkspaceData({
   initialStatus,
   initialHotspots,
   initialHotspotStatus,
-  initialBrief,
   hasInitialWorkspacePayload,
   viewportKey,
   queryParams,
-  briefParams,
 }: UseWorkspaceDataOptions) {
   const abortRef = useRef<AbortController | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -37,14 +33,12 @@ export function useWorkspaceData({
   const preserveRankingUntilRef = useRef(0);
   const initialLoadRef = useRef(false);
   const loadWorkspaceRef = useRef<(mode?: LoadMode) => void>(() => undefined);
-  const briefCacheRef = useRef<Map<string, DailyBrief>>(new Map());
   const statusCacheRef = useRef<DataStatus | null>(initialStatus);
   const previousFiltersRef = useRef<typeof filters | null>(null);
   const previousViewportRef = useRef<string | null>(null);
 
   const [hotspots, setHotspots] = useState<MapHotspot[]>(initialHotspots);
   const [ranking, setRanking] = useState<MapHotspot[]>(initialHotspots.slice(0, 20));
-  const [brief, setBrief] = useState<DailyBrief | null>(initialBrief);
   const [status, setStatus] = useState<DataStatus>(initialStatus);
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState<string | null>(initialHotspotStatus.message);
@@ -65,18 +59,7 @@ export function useWorkspaceData({
         response,
         payload: (await response.json()) as HotspotsPayload,
       }));
-      const briefKey = filters.date || "__default__";
-      const cachedBrief = briefCacheRef.current.get(briefKey);
       const cachedStatus = statusCacheRef.current;
-      const briefRequest =
-        mode === "full"
-          ? cachedBrief
-            ? Promise.resolve<{ brief: DailyBrief }>({ brief: cachedBrief })
-            : fetch(`/api/daily-brief?${briefParams().toString()}`, {
-                cache: "no-store",
-                signal: controller.signal,
-              }).then((response) => response.json() as Promise<{ brief: DailyBrief }>)
-          : Promise.resolve<{ brief: DailyBrief } | null>(null);
       const statusRequest =
         mode === "full"
           ? cachedStatus
@@ -86,9 +69,8 @@ export function useWorkspaceData({
                 signal: controller.signal,
               }).then((response) => response.json() as Promise<{ status: DataStatus }>)
           : Promise.resolve<{ status: DataStatus } | null>(null);
-      const [hotspotResult, briefPayload, statusPayload] = await Promise.all([
+      const [hotspotResult, statusPayload] = await Promise.all([
         hotspotRequest,
-        briefRequest,
         statusRequest,
       ]);
       if (requestId !== requestIdRef.current) return;
@@ -104,10 +86,6 @@ export function useWorkspaceData({
 
       if (mode === "hotspots" || mode === "viewport") return;
 
-      if (briefPayload) {
-        briefCacheRef.current.set(briefKey, briefPayload.brief);
-        setBrief(briefPayload.brief);
-      }
       if (statusPayload) {
         statusCacheRef.current = statusPayload.status;
         setStatus(statusPayload.status);
@@ -120,7 +98,7 @@ export function useWorkspaceData({
         setLoading(false);
       }
     }
-  }, [briefParams, databaseReady, filters.date, mapReady, queryParams]);
+  }, [databaseReady, mapReady, queryParams]);
 
   useEffect(() => {
     loadWorkspaceRef.current = loadWorkspace;
@@ -177,7 +155,6 @@ export function useWorkspaceData({
   return {
     hotspots,
     ranking,
-    brief,
     status,
     loading,
     message,

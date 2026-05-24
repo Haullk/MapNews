@@ -252,6 +252,11 @@ def dataset_status(stats: LoaderStats, failures: int) -> str:
     return "failed"
 
 
+def gkg_loader_enabled() -> bool:
+    value = os.getenv("MAPNEWS_ENABLE_GKG", os.getenv("GDELT_ENABLE_GKG", "false"))
+    return value.lower() in {"1", "true", "yes", "on"}
+
+
 def update_batch_dataset(conn: Connection, batch_id: int, dataset: str, status: str, rows: int) -> None:
     column = {"events": "events_status", "mentions": "mentions_status", "gkg": "gkg_status"}[dataset]
     rows_column = {"events": "events_rows", "mentions": "mentions_rows", "gkg": "gkg_rows"}[dataset]
@@ -357,7 +362,7 @@ def run_daily_import(day: date, limit_files: int | None = None, keep_raw: bool =
     raw_dir.mkdir(parents=True, exist_ok=True)
     base_url = os.getenv("GDELT_BASE_URL", GDELT_BASE_URL)
     enabled_datasets = ["events", "mentions"]
-    if os.getenv("MAPNEWS_ENABLE_GKG", os.getenv("GDELT_ENABLE_GKG", "true")).lower() != "false":
+    if gkg_loader_enabled():
         enabled_datasets.append("gkg")
 
     total = LoaderStats()
@@ -365,6 +370,8 @@ def run_daily_import(day: date, limit_files: int | None = None, keep_raw: bool =
         clear_raw_before_import(conn)
         conn.commit()
         batch_id = create_batch(conn, day)
+        if "gkg" not in enabled_datasets:
+            update_batch_dataset(conn, batch_id, "gkg", "skipped", 0)
         conn.commit()
         try:
             dataset_failures = 0
@@ -403,7 +410,7 @@ def run_daily_import(day: date, limit_files: int | None = None, keep_raw: bool =
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Import one day of GDELT Events, Mentions and GKG raw files.",
+        description="Import one day of GDELT Events and Mentions raw files. GKG is optional via MAPNEWS_ENABLE_GKG=true.",
     )
     parser.add_argument("--date", help="UTC date to import, YYYY-MM-DD. Defaults to yesterday UTC.")
     parser.add_argument("--limit-files", type=int, help="Import only the first N files per dataset.")

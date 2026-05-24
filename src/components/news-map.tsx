@@ -25,11 +25,11 @@ import {
 import type { HotspotMarkerView } from "@/components/map/hotspot-layer";
 import { useWorkspaceData } from "@/components/hooks/use-workspace-data";
 import { MapRenderer } from "@/components/map/map-renderer";
+import { DemoStatePanel } from "@/components/panel/demo-state-panel";
 import { DetailsDrawer, type DetailTab } from "@/components/panel/details-drawer";
-import { RankingList } from "@/components/panel/ranking-list";
+import { RankingList, type ResultSortMode } from "@/components/panel/ranking-list";
 import type {
   DataStatus,
-  DailyBrief,
   HotspotDetail,
   MapHotspot,
   QueryStatus,
@@ -43,7 +43,6 @@ interface NewsMapProps {
   initialStatus: DataStatus;
   initialHotspots: MapHotspot[];
   initialHotspotStatus: QueryStatus;
-  initialBrief: DailyBrief | null;
 }
 
 interface Filters {
@@ -102,6 +101,152 @@ const GOLDSTEIN_NEGATIVE = "#dc2626";
 const GOLDSTEIN_NEUTRAL = "#f8fafc";
 const GOLDSTEIN_POSITIVE = "#2563eb";
 const GOLDSTEIN_MISSING = "#94a3b8";
+
+const DEMO_HOTSPOTS: MapHotspot[] = [
+  {
+    id: -1,
+    regionKey: "demo:beijing",
+    regionName: "北京, 中国",
+    lat: 39.9042,
+    lng: 116.4074,
+    channel: "国际",
+    primaryHotspotId: -1,
+    channelCount: 3,
+    channelBreakdown: [
+      { hotspotId: -1, channel: "国际", heatScore: 620, eventCount: 32, mentionCount: 96, sourceCount: 28, summary: "演示国际关系热点。" },
+      { hotspotId: -2, channel: "政治", heatScore: 360, eventCount: 18, mentionCount: 44, sourceCount: 16, summary: "演示政治治理热点。" },
+      { hotspotId: -3, channel: "经济", heatScore: 210, eventCount: 11, mentionCount: 22, sourceCount: 9, summary: "演示经济产业热点。" },
+    ],
+    heatScore: 1190,
+    eventCount: 61,
+    mentionCount: 162,
+    sourceCount: 53,
+    dataDate: "演示数据",
+    summary: "演示数据：北京显示为地区综合热点，用于说明地图、排行和详情交互。",
+    dominantQuadClass: 1,
+    quadClassLabel: "口头合作",
+    quadClassBreakdown: [
+      { quadClass: 1, label: "口头合作", eventCount: 28, share: 0.46 },
+      { quadClass: 3, label: "口头冲突", eventCount: 18, share: 0.3 },
+      { quadClass: 2, label: "实质合作", eventCount: 15, share: 0.24 },
+    ],
+    weightedGoldstein: 1.8,
+    goldsteinMin: -3.2,
+    goldsteinMax: 6.5,
+    heatDelta: 120,
+    trendLabel: "升温",
+    topActors: [
+      { name: "CHINA", count: 26 },
+      { name: "UNITED STATES", count: 14 },
+      { name: "BEIJING", count: 9 },
+    ],
+  },
+  {
+    id: -4,
+    regionKey: "demo:tehran",
+    regionName: "Tehran, Iran",
+    lat: 35.6892,
+    lng: 51.389,
+    channel: "冲突",
+    primaryHotspotId: -4,
+    channelCount: 2,
+    channelBreakdown: [
+      { hotspotId: -4, channel: "冲突", heatScore: 780, eventCount: 40, mentionCount: 130, sourceCount: 35, summary: "演示冲突安全热点。" },
+      { hotspotId: -5, channel: "国际", heatScore: 420, eventCount: 20, mentionCount: 70, sourceCount: 18, summary: "演示国际关系热点。" },
+    ],
+    heatScore: 1200,
+    eventCount: 60,
+    mentionCount: 200,
+    sourceCount: 53,
+    dataDate: "演示数据",
+    summary: "演示数据：Tehran 显示为高热地区，点的大小代表综合热度。",
+    dominantQuadClass: 4,
+    quadClassLabel: "实质冲突",
+    quadClassBreakdown: [
+      { quadClass: 4, label: "实质冲突", eventCount: 35, share: 0.58 },
+      { quadClass: 3, label: "口头冲突", eventCount: 25, share: 0.42 },
+    ],
+    weightedGoldstein: -4.6,
+    goldsteinMin: -8,
+    goldsteinMax: 1.5,
+    heatDelta: 80,
+    trendLabel: "活跃",
+    topActors: [
+      { name: "IRAN", count: 31 },
+      { name: "TEHRAN", count: 12 },
+    ],
+  },
+  {
+    id: -6,
+    regionKey: "demo:washington",
+    regionName: "Washington, United States",
+    lat: 38.9072,
+    lng: -77.0369,
+    channel: "政治",
+    primaryHotspotId: -6,
+    channelCount: 2,
+    channelBreakdown: [
+      { hotspotId: -6, channel: "政治", heatScore: 720, eventCount: 36, mentionCount: 88, sourceCount: 30, summary: "演示政治治理热点。" },
+      { hotspotId: -7, channel: "社会", heatScore: 180, eventCount: 10, mentionCount: 20, sourceCount: 8, summary: "演示社会民生热点。" },
+    ],
+    heatScore: 900,
+    eventCount: 46,
+    mentionCount: 108,
+    sourceCount: 38,
+    dataDate: "演示数据",
+    summary: "演示数据：Washington 显示为政治治理热点，点击可查看演示态势。",
+    dominantQuadClass: 3,
+    quadClassLabel: "口头冲突",
+    quadClassBreakdown: [
+      { quadClass: 3, label: "口头冲突", eventCount: 24, share: 0.52 },
+      { quadClass: 1, label: "口头合作", eventCount: 22, share: 0.48 },
+    ],
+    weightedGoldstein: -0.8,
+    goldsteinMin: -5,
+    goldsteinMax: 4,
+    heatDelta: -45,
+    trendLabel: "冷却",
+    topActors: [
+      { name: "UNITED STATES", count: 22 },
+      { name: "WASHINGTON", count: 11 },
+    ],
+  },
+  {
+    id: -8,
+    regionKey: "demo:new-delhi",
+    regionName: "New Delhi, India",
+    lat: 28.6139,
+    lng: 77.209,
+    channel: "经济",
+    primaryHotspotId: -8,
+    channelCount: 2,
+    channelBreakdown: [
+      { hotspotId: -8, channel: "经济", heatScore: 520, eventCount: 24, mentionCount: 55, sourceCount: 22, summary: "演示经济产业热点。" },
+      { hotspotId: -9, channel: "国际", heatScore: 260, eventCount: 12, mentionCount: 28, sourceCount: 11, summary: "演示国际关系热点。" },
+    ],
+    heatScore: 780,
+    eventCount: 36,
+    mentionCount: 83,
+    sourceCount: 33,
+    dataDate: "演示数据",
+    summary: "演示数据：New Delhi 用于展示经济和国际话题占比。",
+    dominantQuadClass: 2,
+    quadClassLabel: "实质合作",
+    quadClassBreakdown: [
+      { quadClass: 2, label: "实质合作", eventCount: 21, share: 0.58 },
+      { quadClass: 1, label: "口头合作", eventCount: 15, share: 0.42 },
+    ],
+    weightedGoldstein: 3.2,
+    goldsteinMin: -1,
+    goldsteinMax: 7,
+    heatDelta: 30,
+    trendLabel: "升温",
+    topActors: [
+      { name: "INDIA", count: 20 },
+      { name: "NEW DELHI", count: 8 },
+    ],
+  },
+];
 
 const COUNTRY_ALIASES: Record<string, string[]> = {
   CHN: ["中国", "中华人民共和国", "China"],
@@ -228,6 +373,32 @@ function formatHeatDelta(value: number | null) {
 function formatGoldstein(value: number | null) {
   if (value === null) return "暂无";
   return `${value > 0 ? "+" : ""}${value.toFixed(1)}`;
+}
+
+function compareHotspotsByHeat(left: MapHotspot, right: MapHotspot) {
+  return (
+    right.heatScore - left.heatScore ||
+    right.sourceCount - left.sourceCount ||
+    left.regionName.localeCompare(right.regionName, "zh-CN")
+  );
+}
+
+function attitudeSortValue(hotspot: MapHotspot) {
+  return hotspot.weightedGoldstein ?? Number.POSITIVE_INFINITY;
+}
+
+function sortResultHotspots(items: MapHotspot[], sortMode: ResultSortMode) {
+  const sorted = [...items];
+  if (sortMode === "attitude") {
+    return sorted.sort(
+      (left, right) =>
+        attitudeSortValue(left) - attitudeSortValue(right) ||
+        right.heatScore - left.heatScore ||
+        right.sourceCount - left.sourceCount ||
+        left.regionName.localeCompare(right.regionName, "zh-CN"),
+    );
+  }
+  return sorted.sort(compareHotspotsByHeat);
 }
 
 function hotspotLimitForZoom(zoom: number) {
@@ -481,7 +652,6 @@ export function NewsMap({
   initialStatus,
   initialHotspots,
   initialHotspotStatus,
-  initialBrief,
 }: NewsMapProps) {
   const mapEl = useRef<HTMLDivElement | null>(null);
   const trendAbortRef = useRef<AbortController | null>(null);
@@ -495,6 +665,7 @@ export function NewsMap({
   const pendingMapViewRef = useRef<MapView | null>(null);
   const mapFrameRef = useRef<number | null>(null);
   const dragRef = useRef<{ pointerId: number; x: number; y: number; moved: boolean } | null>(null);
+  const sortLoadReadyRef = useRef(false);
 
   const [assets, setAssets] = useState<MapAssets | null>(null);
   const [mapLoadError, setMapLoadError] = useState<string | null>(null);
@@ -513,6 +684,7 @@ export function NewsMap({
   const [enrichmentState, setEnrichmentState] = useState<EnrichmentState | null>(null);
   const [searchText, setSearchText] = useState("");
   const [searchMessage, setSearchMessage] = useState<string | null>(null);
+  const [resultSortMode, setResultSortMode] = useState<ResultSortMode>("heat");
   const [filters, setFilters] = useState<Filters>({ date: dates[0] ?? "", channel: "", region: "" });
 
   const { projection, mapContentBounds, countryPaths, regionPaths, mapLabels } = useMapGeometry(assets, size, mapView);
@@ -523,6 +695,7 @@ export function NewsMap({
       if (filters.date) params.set("date", filters.date);
       if (filters.channel) params.set("channel", filters.channel);
       if (filters.region) params.set("region", filters.region);
+      if (resultSortMode === "attitude") params.set("sort", "attitude");
       if (withBounds) {
         const bbox = bboxFromView(projectionRef.current, mapViewRef.current, sizeRef.current);
         if (bbox && bbox.east > bbox.west && bbox.north > bbox.south) {
@@ -534,20 +707,14 @@ export function NewsMap({
       }
       return params;
     },
-    [filters],
+    [filters, resultSortMode],
   );
-  const briefParams = useCallback(() => {
-    const params = new URLSearchParams();
-    if (filters.date) params.set("date", filters.date);
-    return params;
-  }, [filters.date]);
   const currentViewportKey = mapReady ? viewportKey(projection, mapView, size) : null;
   const hasInitialWorkspacePayload =
-    initialHotspotStatus.ok || initialHotspots.length > 0 || initialBrief !== null || !databaseReady;
+    initialHotspotStatus.ok || initialHotspots.length > 0 || !databaseReady;
   const {
     hotspots,
     ranking,
-    brief,
     status,
     loading,
     message,
@@ -561,22 +728,28 @@ export function NewsMap({
     initialStatus,
     initialHotspots,
     initialHotspotStatus,
-    initialBrief,
     hasInitialWorkspacePayload,
     viewportKey: currentViewportKey,
     queryParams,
-    briefParams,
   });
+  const systemEmpty = !loading && hotspots.length === 0 && (!databaseReady || (!status.currentDataDate && dates.length === 0));
+  const showDemoMode = systemEmpty;
+  const displayHotspots = showDemoMode ? DEMO_HOTSPOTS : hotspots;
+  const rawDisplayRanking = showDemoMode ? DEMO_HOTSPOTS : ranking;
+  const displayRanking = useMemo(
+    () => sortResultHotspots(rawDisplayRanking, resultSortMode),
+    [rawDisplayRanking, resultSortMode],
+  );
   const candidateHotspots = useMemo(() => {
-    const limit = hotspotCandidateLimitForZoom(mapView.k, hotspots.length);
-    const candidates = hotspots.slice(0, limit);
+    const limit = hotspotCandidateLimitForZoom(mapView.k, displayHotspots.length);
+    const candidates = displayHotspots.slice(0, limit);
     if (selectedRegion && !candidates.some((hotspot) => hotspot.regionKey === selectedRegion.regionKey && hotspot.dataDate === selectedRegion.dataDate)) {
       candidates.push(selectedRegion);
     }
     return candidates;
-  }, [hotspots, mapView.k, selectedRegion]);
+  }, [displayHotspots, mapView.k, selectedRegion]);
   const hotspotHeatScale = useMemo(() => {
-    const values = hotspots
+    const values = displayHotspots
       .map((hotspot) => hotspot.heatScore)
       .filter((heatScore) => Number.isFinite(heatScore) && heatScore > 0)
       .sort((a, b) => a - b);
@@ -584,22 +757,32 @@ export function NewsMap({
       low: quantile(values, 0.5),
       high: quantile(values, 0.95),
     };
-  }, [hotspots]);
-  const maxRankingHeat = Math.max(...ranking.map((item) => item.heatScore), 1);
+  }, [displayHotspots]);
+  const maxRankingHeat = Math.max(...displayRanking.map((item) => item.heatScore), 1);
   const selectedRegionRank = useMemo(() => {
     if (!selectedRegion) return null;
-    const rankingIndex = ranking.findIndex(
+    const rankingIndex = displayRanking.findIndex(
       (item) => item.regionKey === selectedRegion.regionKey && item.dataDate === selectedRegion.dataDate,
     );
     if (rankingIndex >= 0) return rankingIndex + 1;
-    const hotspotIndex = hotspots.findIndex(
+    const hotspotIndex = displayHotspots.findIndex(
       (item) => item.regionKey === selectedRegion.regionKey && item.dataDate === selectedRegion.dataDate,
     );
     return hotspotIndex >= 0 ? hotspotIndex + 1 : null;
-  }, [hotspots, ranking, selectedRegion]);
+  }, [displayHotspots, displayRanking, selectedRegion]);
   const selectedEnrichmentState =
     selected && enrichmentState?.hotspotId === selected.id ? enrichmentState : null;
   const searchTargets = useMemo(() => buildSearchTargets(assets), [assets]);
+
+  useEffect(() => {
+    if (!databaseReady || !mapReady) return;
+    if (!sortLoadReadyRef.current) {
+      sortLoadReadyRef.current = true;
+      return;
+    }
+    preserveRankingForViewport(0);
+    scheduleHotspotLoad();
+  }, [databaseReady, mapReady, preserveRankingForViewport, resultSortMode, scheduleHotspotLoad]);
 
   const hotspotMarkers = useMemo(() => {
     if (!projection) return [];
@@ -732,6 +915,11 @@ export function NewsMap({
     if (!selectedRegion) {
       setRegionTrend(null);
       setRegionTrendMessage(null);
+      return;
+    }
+    if (selectedRegion.id < 0) {
+      setRegionTrend(null);
+      setRegionTrendMessage("演示模式不加载真实趋势数据。");
       return;
     }
 
@@ -869,7 +1057,7 @@ export function NewsMap({
     setEnrichmentState({
       hotspotId: id,
       status: "running",
-      message: "正在补充来源元数据、故事组和主题实体。",
+      message: "正在补充来源信息，并整理主要报道。",
     });
     try {
       const response = await fetch(`/api/hotspots/${id}/enrich`, { cache: "no-store", method: "POST" });
@@ -917,6 +1105,10 @@ export function NewsMap({
     setEnrichmentState(null);
     setSourceMessage(null);
     setDetailTab("region");
+    if (hotspot.primaryHotspotId < 0) {
+      setSourceMessage("演示模式不加载真实相关新闻。真实数据导入完成后可查看主要报道和原文链接。");
+      return;
+    }
     void loadChannelHotspot(hotspot.primaryHotspotId, { switchToSource: false, triggerEnrichment: true });
   }
 
@@ -935,7 +1127,7 @@ export function NewsMap({
       setExpandedStoryId(hotspot?.storyGroups[0]?.id ?? null);
       if (options.switchToSource) setDetailTab("source");
       if (!hotspot) {
-        setSourceMessage("未找到该主题来源分析。");
+        setSourceMessage("未找到该话题相关新闻。");
         setEnrichmentState(null);
         return;
       }
@@ -948,7 +1140,7 @@ export function NewsMap({
       if (requestId !== channelRequestRef.current) return;
       setSelected(null);
       setExpandedStoryId(null);
-      setSourceMessage(error instanceof Error ? error.message : "来源分析加载失败。");
+      setSourceMessage(error instanceof Error ? error.message : "相关新闻加载失败。");
       setEnrichmentState(null);
       if (options.switchToSource) setDetailTab("source");
     } finally {
@@ -957,6 +1149,14 @@ export function NewsMap({
   }
 
   function openChannelHotspot(id: number) {
+    if (id < 0) {
+      setSelected(null);
+      setExpandedStoryId(null);
+      setEnrichmentState(null);
+      setSourceMessage("演示模式不加载真实相关新闻。真实数据导入完成后可切换话题查看来源。");
+      setDetailTab("source");
+      return;
+    }
     void loadChannelHotspot(id, { switchToSource: true, triggerEnrichment: true });
   }
 
@@ -964,7 +1164,7 @@ export function NewsMap({
     preserveRankingForViewport(1200);
     zoomToPoint(item.lng, item.lat, 10.5);
     openRegionHotspot(item);
-    scheduleHotspotLoad();
+    if (item.id >= 0) scheduleHotspotLoad();
   }
 
   function searchRegion() {
@@ -1000,7 +1200,6 @@ export function NewsMap({
       missing_published_at: "缺发布时间",
       fetch_failed: "抓取失败",
       metadata_not_fetched: "未抓取元数据",
-      gkg_missing: "主题缺失",
     };
     return labels[flag] ?? flag;
   }
@@ -1015,54 +1214,55 @@ export function NewsMap({
       ? status.currentDataDate || filters.date
         ? {
             title: "当前范围暂无态势热点",
-            body: message ?? "当前日期、主题、地区或地图范围没有匹配结果，可调整筛选或缩放地图。",
+            body: message ?? "当前日期、话题、地区或地图范围没有匹配结果，可调整筛选或缩放地图。",
           }
         : {
             title: "暂无可展示数据",
             body: "数据库已连接，但还没有可展示的地图热点。请先运行 GDELT 导入和清洗任务。",
-          }
+        }
       : null;
   const mapOverlayText = mapLoadError
     ? mapLoadError
-    : loading && hotspots.length === 0
+    : showDemoMode
+      ? `演示数据 · 当前地图显示 ${hotspotMarkers.length}/${displayHotspots.length} 个示例热点`
+      : loading && hotspots.length === 0
       ? "正在加载热点..."
-      : `${loading ? "正在刷新热点..." : message ?? status.message} · 当前地图显示 ${hotspotMarkers.length}/${hotspots.length} 个热点`;
+      : `${loading ? "正在刷新热点..." : message ?? status.message} · 当前地图显示 ${hotspotMarkers.length}/${displayHotspots.length} 个热点`;
 
   return (
     <section className={`map-workspace ${selectedRegion ? "has-detail-drawer" : ""}`}>
       <aside className="control-panel" aria-label="全球态势热点工作台">
-        <div className="sidebar-section">
-          <p className="eyebrow">今日态势简报</p>
-          <p className="brief-text">{brief?.briefText ?? "正在读取今日态势简报。"}</p>
-          <div className="status-note">{brief?.completenessText ?? status.message}</div>
-        </div>
-
         <div className="sidebar-section filters-grid">
-          <label>
-            日期
-            <select value={filters.date} onChange={(event) => setFilters((prev) => ({ ...prev, date: event.target.value }))}>
-              <option value="">最近可用</option>
-              {dates.map((date) => (
-                <option key={date} value={date}>
-                  {date}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label>
-            主题
-            <select
-              value={filters.channel}
-              onChange={(event) => setFilters((prev) => ({ ...prev, channel: event.target.value }))}
-            >
-              <option value="">全部主题</option>
-              {channels.map((channel) => (
-                <option key={channel} value={channel}>
-                  {themeLabel(channel)}
-                </option>
-              ))}
-            </select>
-          </label>
+          <div className="section-heading">
+            <p className="eyebrow">筛选</p>
+          </div>
+          <div className="filter-row">
+            <label>
+              日期
+              <select value={filters.date} onChange={(event) => setFilters((prev) => ({ ...prev, date: event.target.value }))}>
+                <option value="">最近可用</option>
+                {dates.map((date) => (
+                  <option key={date} value={date}>
+                    {date}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              话题
+              <select
+                value={filters.channel}
+                onChange={(event) => setFilters((prev) => ({ ...prev, channel: event.target.value }))}
+              >
+                <option value="">全部话题</option>
+                {channels.map((channel) => (
+                  <option key={channel} value={channel}>
+                    {themeLabel(channel)}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
           <label className="region-search">
             地区搜索
             <span className="search-row">
@@ -1085,20 +1285,14 @@ export function NewsMap({
           </label>
         </div>
 
-        <div className="stats-grid">
-          <div className="stat-cell">
-            <span>热点</span>
-            <strong>{hotspots.length}</strong>
-          </div>
-          <div className="stat-cell">
-            <span>当前日期</span>
-            <strong>{status.currentDataDate ?? filters.date ?? "暂无"}</strong>
-          </div>
-          <div className="stat-cell">
-            <span>导入状态</span>
-            <strong>{status.isComplete ? "完整" : "待确认"}</strong>
-          </div>
+        <div className="sidebar-section current-view-section">
+          <p className="eyebrow">当前结果</p>
+          <p>
+            {status.currentDataDate ?? filters.date ?? "暂无日期"} · {showDemoMode ? `演示 ${displayHotspots.length} 个热点` : `共 ${displayHotspots.length} 个热点`} · 地图显示 {hotspotMarkers.length} 个
+          </p>
         </div>
+
+        <DemoStatePanel status={status} demoMode={showDemoMode} />
 
         {workspaceNotice ? (
           <div className="workspace-state">
@@ -1108,14 +1302,14 @@ export function NewsMap({
         ) : null}
 
         <RankingList
-          items={ranking}
+          items={displayRanking}
           maxHeat={maxRankingHeat}
-          visibleMarkerCount={hotspotMarkers.length}
-          totalHotspotCount={hotspots.length}
+          sortMode={resultSortMode}
+          onSortModeChange={setResultSortMode}
           selectedRegionKey={selectedRegion?.regionKey ?? null}
           selectedDataDate={selectedRegion?.dataDate ?? null}
           onLocate={locateRankingItem}
-          goldsteinColor={goldsteinColor}
+          channelColors={CHANNEL_COLORS}
           formatGoldstein={formatGoldstein}
           themeLabel={themeLabel}
         />
@@ -1155,7 +1349,7 @@ export function NewsMap({
           region={selectedRegion}
           selected={selected}
           rank={selectedRegionRank}
-          totalHotspots={hotspots.length}
+          totalHotspots={displayHotspots.length}
           activeTab={detailTab}
           onTabChange={setDetailTab}
           regionTrend={regionTrend}

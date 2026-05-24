@@ -159,7 +159,7 @@ export function MapRenderer({
             热度 {hoveredMarker.hotspot.heatScore.toFixed(1)} · {hoveredMarker.hotspot.eventCount} 事件 · {hoveredMarker.hotspot.sourceCount} 来源
           </small>
           <small>
-            较昨日 {formatHeatDelta(hoveredMarker.hotspot.heatDelta)} · 主主题 {themeLabel(hoveredMarker.hotspot.channel)}
+            较昨日 {formatHeatDelta(hoveredMarker.hotspot.heatDelta)} · {themeLabel(hoveredMarker.hotspot.channel)}
           </small>
         </div>
       ) : null}

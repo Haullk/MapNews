@@ -194,7 +194,7 @@ export function ThemeDonutChart({
   }
 
   if (!sortedItems.length || !activeItem) {
-    return <div className="empty-detail">暂无主题构成数据。</div>;
+    return <div className="empty-detail">暂无话题占比数据。</div>;
   }
 
   return (
@@ -203,7 +203,7 @@ export function ThemeDonutChart({
         <svg
           className="theme-donut-svg"
           viewBox="0 0 220 220"
-          aria-label="主题热度占比圆环图"
+          aria-label="话题热度占比圆环图"
           onClick={handleSvgClick}
         >
           <circle className="theme-donut-track" cx={CENTER} cy={CENTER} r={RADIUS} />
@@ -211,7 +211,7 @@ export function ThemeDonutChart({
             const active =
               segment.item.hotspotId === focusedHotspotId ||
               segment.item.hotspotId === selectedHotspotId;
-            const label = `${themeLabel(segment.item.channel)}，约 ${percentLabel(segment.percent)} 热度，${segment.item.eventCount} 个事件，${segment.item.sourceCount} 个来源，点击查看来源分析`;
+            const label = `${themeLabel(segment.item.channel)}，约 ${percentLabel(segment.percent)} 热度，${segment.item.eventCount} 个事件，${segment.item.sourceCount} 个来源，点击查看相关新闻`;
             return (
               <g
                 key={segment.item.hotspotId}
@@ -238,7 +238,7 @@ export function ThemeDonutChart({
           <small>{activeItem.sourceCount} 个来源 · {activeItem.eventCount} 个事件</small>
         </div>
       </div>
-      <p className="theme-donut-hint">悬停查看主题，点击色块进入来源分析。</p>
+      <p className="theme-donut-hint">悬停查看话题，点击色块查看相关新闻。</p>
     </div>
   );
 }

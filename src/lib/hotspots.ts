@@ -22,6 +22,7 @@ export interface HotspotFilters {
   date?: string;
   channel?: string;
   region?: string;
+  sort?: "heat" | "attitude";
   limit?: number;
   bbox?: {
     west: number;
@@ -169,6 +170,23 @@ export interface DailyBrief {
   briefText: string;
 }
 
+export interface ImportBatchStatus {
+  importDate: string;
+  status: string;
+  processingStatus: string;
+  eventsStatus: string;
+  mentionsStatus: string;
+  gkgStatus: string;
+  filesAttempted: number;
+  filesImported: number;
+  filesRegistered: number;
+  filesFinished: number;
+  rowsInserted: number;
+  startedAt: string | null;
+  finishedAt: string | null;
+  errorMessage: string | null;
+}
+
 export interface DataStatus {
   databaseAvailable: boolean;
   currentDataDate: string | null;
@@ -178,6 +196,7 @@ export interface DataStatus {
   gkgReady: boolean;
   isComplete: boolean;
   message: string;
+  latestImportBatch: ImportBatchStatus | null;
 }
 
 export interface InitialWorkspaceData {
@@ -187,7 +206,6 @@ export interface InitialWorkspaceData {
   status: DataStatus;
   initialHotspots: MapHotspot[];
   initialHotspotStatus: QueryStatus;
-  initialBrief: DailyBrief | null;
 }
 
 export interface RegionTrendPoint {
@@ -437,8 +455,9 @@ function hotspotFromRow(row: {
   const dominantQuadClass = numberOrNull(row.dominant_quad_class);
   const quadBreakdown = quadClassBreakdownArray(row.quad_class_breakdown);
   const summary = row.summary
-    .replace("主频道为", "主主题为")
-    .replace(`主主题为${row.channel}`, `主主题为${themeLabel(row.channel)}`)
+    .replace("主频道为", "主题为")
+    .replace("主主题为", "主题为")
+    .replace(`主题为${row.channel}`, `主题为${themeLabel(row.channel)}`)
     .replace(`出现${row.channel}类热点`, `出现${themeLabel(row.channel)}主题热点`)
     .replace("个频道", "个主题");
   return {
@@ -493,12 +512,11 @@ export async function getDefaultDate(): Promise<string | null> {
 export async function getInitialWorkspaceData(): Promise<InitialWorkspaceData> {
   try {
     const pool = getPool();
-    const [dates, channels, status, hotspotResult, initialBrief] = await Promise.all([
+    const [dates, channels, status, hotspotResult] = await Promise.all([
       pool.query<{ data_date: string }>("select distinct data_date::text from map_hotspots order by data_date desc limit 90"),
       getAvailableChannels(),
       getDataStatus(),
       queryMapHotspots({ limit: 500 }),
-      getDailyBrief(),
     ]);
     return {
       dates: dates.rows.map((row) => row.data_date),
@@ -507,7 +525,6 @@ export async function getInitialWorkspaceData(): Promise<InitialWorkspaceData> {
       status,
       initialHotspots: hotspotResult.hotspots,
       initialHotspotStatus: hotspotResult.status,
-      initialBrief,
     };
   } catch {
     return {
@@ -521,7 +538,6 @@ export async function getInitialWorkspaceData(): Promise<InitialWorkspaceData> {
         message: "数据库暂不可用，无法加载初始态势热点。",
         emptyReason: "database_unavailable",
       },
-      initialBrief: null,
     };
   }
 }
@@ -569,6 +585,10 @@ export async function queryMapHotspots(filters: HotspotFilters) {
   const date = filters.date ?? (await getDefaultDate());
   applyFilters({ ...filters, date: date ?? undefined }, params, where);
   params.push(Math.min(Math.max(filters.limit ?? 500, 50), 1200));
+  const orderBy =
+    filters.sort === "attitude"
+      ? "weighted_goldstein asc nulls last, heat_score desc, event_count desc, region_name asc"
+      : "heat_score desc, event_count desc, region_name asc";
 
   const result = await pool.query<
     Parameters<typeof hotspotFromRow>[0]
@@ -699,14 +719,14 @@ export async function queryMapHotspots(filters: HotspotFilters) {
              end as trend_label,
              coalesce(actor_summary.top_actors, '[]'::jsonb) as top_actors,
              concat(
-               data_date::text, '，', region_name, '出现地区综合热点，主主题为', channel,
+               data_date::text, '，', region_name, '出现地区综合热点，主题为', channel,
                '，包含 ', event_count, ' 个事件、', mention_count,
                ' 次相关报道提及，覆盖 ', channel_count, ' 个主题。'
              ) as summary
       from grouped
       left join quad_summary qs using (data_date, region_key)
       left join actor_summary using (data_date, region_key)
-      order by heat_score desc, event_count desc
+      order by ${orderBy}
       limit $${params.length}
     `,
     params,
@@ -1102,26 +1122,28 @@ export async function getDailyBrief(date?: string): Promise<DailyBrief> {
   if (!dataDate) {
     return emptyBrief("暂无可展示数据。");
   }
-  const result = await pool.query<{
-    data_date: string;
-    hotspot_count: number | string;
-    top_regions: Array<{ name: string; count: number }>;
-    top_channels: Array<{ name: string; count: number }>;
-    brief_text: string;
-    data_updated_at: string;
-  }>(
-    `
-      select data_date::text, hotspot_count, top_regions, top_channels, brief_text, data_updated_at::text
-      from daily_briefs
-      where data_date = $1::date
-    `,
-    [dataDate],
-  );
+  const [result, status] = await Promise.all([
+    pool.query<{
+      data_date: string;
+      hotspot_count: number | string;
+      top_regions: Array<{ name: string; count: number }>;
+      top_channels: Array<{ name: string; count: number }>;
+      brief_text: string;
+      data_updated_at: string;
+    }>(
+      `
+        select data_date::text, hotspot_count, top_regions, top_channels, brief_text, data_updated_at::text
+        from daily_briefs
+        where data_date = $1::date
+      `,
+      [dataDate],
+    ),
+    getDataStatus(),
+  ]);
   const row = result.rows[0];
   if (!row) {
     return emptyBrief(`${dataDate} 暂无地图简报。`, dataDate);
   }
-  const status = await getDataStatus();
   return {
     dataDate: row.data_date,
     hotspotCount: Number(row.hotspot_count),
@@ -1155,13 +1177,14 @@ function databaseDownStatus(): DataStatus {
     gkgReady: false,
     isComplete: false,
     message: "数据库不可用，请检查连接配置和服务状态。",
+    latestImportBatch: null,
   };
 }
 
 export async function getDataStatus(): Promise<DataStatus> {
   try {
     const pool = getPool();
-    const [dateResult, batchResult, gkgParameterResult] = await Promise.all([
+    const [dateResult, batchResult, latestBatchResult, gkgParameterResult] = await Promise.all([
       pool.query<{ data_date: string }>("select data_date::text from map_hotspots order by data_date desc limit 1"),
       pool.query<{
         import_date: string;
@@ -1178,14 +1201,72 @@ export async function getDataStatus(): Promise<DataStatus> {
           limit 1
         `,
       ),
+      pool.query<{
+        import_date: string;
+        status: string;
+        processing_status: string;
+        events_status: string;
+        mentions_status: string;
+        gkg_status: string;
+        files_attempted: number | string;
+        files_imported: number | string;
+        files_registered: number | string;
+        files_finished: number | string;
+        rows_inserted: number | string;
+        started_at: string | null;
+        finished_at: string | null;
+        error_message: string | null;
+      }>(
+        `
+          select
+            b.import_date::text,
+            b.status,
+            b.processing_status,
+            b.events_status,
+            b.mentions_status,
+            b.gkg_status,
+            b.files_attempted,
+            b.files_imported,
+            coalesce(count(f.id), 0) as files_registered,
+            coalesce(count(f.id) filter (where f.status in ('imported', 'skipped', 'failed')), 0) as files_finished,
+            b.rows_inserted,
+            b.started_at::text,
+            b.finished_at::text,
+            b.error_message
+          from gdelt_import_batches b
+          left join gdelt_import_files f on f.batch_id = b.id
+          group by b.id
+          order by b.import_date desc, b.started_at desc
+          limit 1
+        `,
+      ),
       pool.query<{ value: string | null }>("select value from system_parameters where key = 'enable_gkg_loader'"),
     ]);
     const batch = batchResult.rows[0];
+    const latestBatch = latestBatchResult.rows[0];
     const eventsReady = batch?.events_status === "success";
     const mentionsReady = batch?.mentions_status === "success";
     const gkgRequired = gkgParameterResult.rows[0]?.value?.toLowerCase() !== "false";
     const gkgReady = !gkgRequired || batch?.gkg_status === "success";
     const isComplete = Boolean(batch && batch.status === "success" && eventsReady && mentionsReady && gkgReady);
+    const latestImportBatch = latestBatch
+      ? {
+          importDate: latestBatch.import_date,
+          status: latestBatch.status,
+          processingStatus: latestBatch.processing_status,
+          eventsStatus: latestBatch.events_status,
+          mentionsStatus: latestBatch.mentions_status,
+          gkgStatus: latestBatch.gkg_status,
+          filesAttempted: numberValue(latestBatch.files_attempted),
+          filesImported: numberValue(latestBatch.files_imported),
+          filesRegistered: numberValue(latestBatch.files_registered),
+          filesFinished: numberValue(latestBatch.files_finished),
+          rowsInserted: numberValue(latestBatch.rows_inserted),
+          startedAt: latestBatch.started_at,
+          finishedAt: latestBatch.finished_at,
+          errorMessage: latestBatch.error_message,
+        }
+      : null;
     return {
       databaseAvailable: true,
       currentDataDate: dateResult.rows[0]?.data_date ?? null,
@@ -1194,7 +1275,14 @@ export async function getDataStatus(): Promise<DataStatus> {
       mentionsReady,
       gkgReady,
       isComplete,
-      message: isComplete ? "数据已完整导入。" : "数据可用，但最近一次导入可能不完整。",
+      message: isComplete
+        ? "数据已完整导入。"
+        : dateResult.rows[0]?.data_date
+          ? "数据可用，但最近一次导入可能不完整。"
+          : latestImportBatch
+            ? "数据库已连接，正在等待可展示热点生成。"
+            : "数据库已连接，但还没有导入批次记录。",
+      latestImportBatch,
     };
   } catch {
     return databaseDownStatus();

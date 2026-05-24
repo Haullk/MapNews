@@ -27,7 +27,6 @@ export default async function Home() {
           initialStatus={workspace.status}
           initialHotspots={workspace.initialHotspots}
           initialHotspotStatus={workspace.initialHotspotStatus}
-          initialBrief={workspace.initialBrief}
         />
       </ErrorBoundary>
     </main>

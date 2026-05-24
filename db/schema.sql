@@ -369,7 +369,7 @@ create table if not exists system_parameters (
 insert into system_parameters (key, value, value_type, description) values
   ('default_days', '1', 'integer', '首页默认展示最近可用日期'),
   ('ranking_limit', '20', 'integer', '热点排行默认数量'),
-  ('enable_gkg_loader', 'true', 'boolean', '是否装载 GKG 原始数据'),
+  ('enable_gkg_loader', 'false', 'boolean', '是否装载 GKG 原始数据；默认关闭，后续可按需启用'),
   ('enable_mentions_heat', 'true', 'boolean', 'Mentions 是否参与热度计算'),
   ('retention_days', '90', 'integer', '前台产品层和趋势指标保留天数'),
   ('empty_map_keep_last_result', 'false', 'boolean', '无数据时前台是否保留旧标记'),

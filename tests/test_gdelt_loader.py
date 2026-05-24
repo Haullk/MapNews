@@ -1,7 +1,7 @@
 from datetime import date
 
 from worker.gdelt_common import files_for_day, gdelt_file, intervals, stable_row_id
-from worker.gdelt_loader import gkg_key, mention_key
+from worker.gdelt_loader import gkg_key, gkg_loader_enabled, mention_key
 
 
 def test_gdelt_file_names_cover_three_datasets() -> None:
@@ -26,3 +26,16 @@ def test_raw_ids_are_stable() -> None:
     assert mention_key("file.zip", 1, row) == mention_key("file.zip", 1, row)
     assert gkg_key("file.zip", 1, ["doc", "20260517"]) == gkg_key("file.zip", 1, ["doc", "20260517"])
     assert stable_row_id("a", 1) != stable_row_id("a", 2)
+
+
+def test_gkg_loader_is_disabled_by_default(monkeypatch) -> None:
+    monkeypatch.delenv("MAPNEWS_ENABLE_GKG", raising=False)
+    monkeypatch.delenv("GDELT_ENABLE_GKG", raising=False)
+
+    assert gkg_loader_enabled() is False
+
+
+def test_gkg_loader_can_be_enabled_explicitly(monkeypatch) -> None:
+    monkeypatch.setenv("MAPNEWS_ENABLE_GKG", "true")
+
+    assert gkg_loader_enabled() is True

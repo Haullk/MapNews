@@ -76,14 +76,14 @@ export function DetailsDrawer({
           className={activeTab === "region" ? "active" : ""}
           onClick={() => onTabChange("region")}
         >
-          地区态势
+          热点概览
         </button>
         <button
           type="button"
           className={activeTab === "source" ? "active" : ""}
           onClick={() => onTabChange("source")}
         >
-          来源分析
+          相关新闻
         </button>
       </div>
 

@@ -42,25 +42,6 @@ function trendText(region: MapHotspot) {
   return "较昨日持平";
 }
 
-function sourceCoverageText(sourceCount: number) {
-  if (sourceCount >= 1000) return "来源覆盖广";
-  if (sourceCount >= 200) return "多来源报道";
-  if (sourceCount > 0) return "有来源可追溯";
-  return "来源待补充";
-}
-
-function dominantThemes(region: MapHotspot, themeLabel: (channel: string) => string) {
-  return region.channelBreakdown
-    .slice(0, 3)
-    .map((item) => themeLabel(item.channel))
-    .join("、");
-}
-
-function overviewText(region: MapHotspot, themeLabel: (channel: string) => string) {
-  const themes = dominantThemes(region, themeLabel) || themeLabel(region.channel);
-  return `${region.regionName} 今天的报道信号较集中，主要围绕${themes}。${trendText(region)}，来源覆盖 ${region.sourceCount} 个，适合先从主题构成进入来源分析。`;
-}
-
 function actorLabel(name: string) {
   const labels: Record<string, string> = {
     "UNITED STATES": "美国",
@@ -126,32 +107,29 @@ export function RegionDetail({
       <div className="detail-hero region-detail-hero">
         <p className="eyebrow">热点概览</p>
         <h2>{region.regionName}</h2>
-        <div className="situation-badges reader-badges">
-          <span style={{ "--situation-color": situationColor(region) } as CSSProperties}>
-            <i />
-            {heatLabel}
-          </span>
-          <span className={trendClassName(region.trendLabel)}>{trendText(region)}</span>
-          <span>主主题 {themeLabel(region.channel)}</span>
+        <div className="overview-lines">
+          <div>
+            <span style={{ "--situation-color": situationColor(region) } as CSSProperties}>
+              <i />
+              {heatLabel}
+            </span>
+            <span>{rankText(rank, totalHotspots)}</span>
+          </div>
+          <div>
+            <span className={trendClassName(region.trendLabel)}>{trendText(region)}</span>
+            <span>{themeLabel(region.channel)}</span>
+          </div>
         </div>
-        <p className="detail-summary">{overviewText(region, themeLabel)}</p>
-        <div className="detail-metrics reader-metrics">
-          <span>{rankText(rank, totalHotspots)}</span>
-          <span>{sourceCoverageText(region.sourceCount)}</span>
-          <span>{region.channelCount} 个主题</span>
-          <span>{trendText(region)}</span>
-        </div>
-        <div className="supporting-metrics">
+        <div className="supporting-metrics overview-metrics">
           <span>{region.eventCount} 个结构化信号</span>
-          <span>{region.mentionCount} 次报道提及</span>
           <span>{region.sourceCount} 个来源</span>
         </div>
       </div>
 
       <section className="detail-section primary-section">
         <div className="section-heading">
-          <p className="eyebrow">主题构成</p>
-          <span>按热度占比</span>
+          <p className="eyebrow">话题占比</p>
+          <span>按热度计算</span>
         </div>
         <ThemeDonutChart
           items={region.channelBreakdown}

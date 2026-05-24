@@ -14,12 +14,14 @@ export async function GET(request: Request) {
   const south = numberParam(url, "south");
   const east = numberParam(url, "east");
   const north = numberParam(url, "north");
+  const sort = url.searchParams.get("sort") === "attitude" ? "attitude" : "heat";
 
   try {
     const result = await queryMapHotspots({
       date: url.searchParams.get("date") || undefined,
       channel: url.searchParams.get("channel") || undefined,
       region: url.searchParams.get("region") || undefined,
+      sort,
       bbox:
         west === undefined || south === undefined || east === undefined || north === undefined
           ? undefined

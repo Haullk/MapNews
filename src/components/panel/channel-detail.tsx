@@ -32,6 +32,14 @@ function sourceThemePercent(item: HotspotChannelBreakdown, totalHeat: number) {
   return `${Math.round(percent)}%`;
 }
 
+function visibleStoryFlags(flags: string[]) {
+  return flags.filter((flag) => flag !== "gkg_missing");
+}
+
+function visibleUncertaintyWarnings(warnings: string[]) {
+  return warnings.filter((warning) => !warning.includes("主题/实体数据"));
+}
+
 function SourceThemeSwitcher({
   items,
   selectedHotspotId,
@@ -45,15 +53,16 @@ function SourceThemeSwitcher({
   themeLabel: (channel: string) => string;
   onOpenChannelHotspot: (id: number) => void;
 }) {
-  if (!items.length) return null;
+  const safeItems = items ?? [];
+  if (!safeItems.length) return null;
 
-  const sortedItems = [...items].sort((left, right) => right.heatScore - left.heatScore);
+  const sortedItems = [...safeItems].sort((left, right) => right.heatScore - left.heatScore);
   const totalHeat = sortedItems.reduce((sum, item) => sum + item.heatScore, 0);
 
   return (
-    <section className="source-theme-switcher" aria-label="来源分析主题切换">
+    <section className="source-theme-switcher" aria-label="相关新闻话题切换">
       <div className="section-heading">
-        <p className="eyebrow">切换主题</p>
+        <p className="eyebrow">选择话题</p>
         <span>同一地区</span>
       </div>
       <div className="source-theme-buttons">
@@ -99,6 +108,7 @@ export function ChannelDetail({
   themeLabel,
   flagText,
 }: ChannelDetailProps) {
+  const sourceQuality = selected?.explanation.sourceQuality ?? null;
   const switcher = (
     <SourceThemeSwitcher
       items={channelBreakdown}
@@ -113,7 +123,7 @@ export function ChannelDetail({
     return (
       <article className="detail-panel">
         {switcher}
-        <div className="empty-detail">正在加载主主题来源分析。</div>
+        <div className="empty-detail">正在加载相关新闻。</div>
       </article>
     );
   }
@@ -122,40 +132,44 @@ export function ChannelDetail({
     return (
       <article className="detail-panel">
         {switcher}
-        <div className="empty-detail">{message ?? "选择一个主题查看代表来源、故事组和来源质量。"}</div>
+        <div className="empty-detail">{message ?? "选择一个话题，查看主要报道和原文来源。"}</div>
       </article>
     );
   }
 
+  const uncertaintyWarnings = visibleUncertaintyWarnings(selected.explanation.uncertaintyWarnings);
+
   return (
     <article className="detail-panel">
-      {switcher}
-      {loading ? <div className="empty-detail source-refreshing">正在刷新来源分析。</div> : null}
+      {loading ? <div className="empty-detail source-refreshing">正在更新相关新闻。</div> : null}
       {message && !loading ? <div className="empty-detail source-refreshing">{message}</div> : null}
       <div className="detail-hero channel-detail-hero">
-        <p className="eyebrow">主题来源诊断</p>
-        <h2>{selected.explanation.title}</h2>
-        <div className="situation-badges">
-          <span style={{ "--situation-color": situationColor(selected) } as CSSProperties}>
-            <i />
-            {selected.quadClassLabel}
-          </span>
-          <span className={trendClassName(selected.trendLabel)}>{selected.trendLabel}</span>
-          <span>GDELT 态势倾向 {formatGoldstein(selected.weightedGoldstein)}</span>
+        <p className="eyebrow">报道概览</p>
+        <h2>{selected.regionName}</h2>
+        <div className="overview-lines">
+          <div>
+            <span>{themeLabel(selected.channel)}</span>
+            <span style={{ "--situation-color": situationColor(selected) } as CSSProperties}>
+              <i />
+              {selected.quadClassLabel}
+            </span>
+          </div>
+          <div>
+            <span className={trendClassName(selected.trendLabel)}>{selected.trendLabel}</span>
+            <span>GDELT {formatGoldstein(selected.weightedGoldstein)}</span>
+          </div>
         </div>
-        <p className="detail-summary">{selected.explanation.whatHappened}</p>
-        <div className="detail-metrics">
-          <span>主题 {themeLabel(selected.channel)}</span>
+        <div className="supporting-metrics overview-metrics">
           <span>{selected.sourceCount} 个来源</span>
-          <span>{selected.domainCount} 个域名</span>
-          <span>{selected.explanation.sourceQuality.fetchedSourceCount} 个代表来源</span>
+          <span>已分析 {sourceQuality?.fetchedSourceCount ?? 0} 个来源</span>
           <span>
-            {selected.explanation.sourceQuality.storyCount
-              ? `${selected.explanation.sourceQuality.storyCount} 个故事组`
-              : "故事组待补充"}
+            {sourceQuality?.storyCount
+              ? `${sourceQuality.storyCount} 组主要报道`
+              : "主要报道待补充"}
           </span>
         </div>
       </div>
+      {switcher}
 
       {hotspotNeedsEnrichment(selected) || enrichmentState ? (
         <div className={`enrichment-banner ${enrichmentState?.status ?? "running"}`}>
@@ -168,16 +182,17 @@ export function ChannelDetail({
           </strong>
           <span>
             {enrichmentState?.message ??
-              "正在抓取代表来源元数据，并生成故事组、主题和参与方信息。"}
+              "正在抓取来源信息，并整理主要报道。"}
           </span>
         </div>
       ) : null}
 
       <section className="detail-section">
-        <p className="eyebrow">热点内故事组</p>
+        <p className="eyebrow">主要报道</p>
         <div className="story-list">
           {selected.storyGroups.map((story) => {
             const expanded = expandedStoryId === story.id;
+            const qualityFlags = visibleStoryFlags(story.qualityFlags);
             return (
               <div key={story.id} className="story-card">
                 <button type="button" className="story-card-toggle" onClick={() => onToggleStory(story.id)}>
@@ -186,9 +201,9 @@ export function ChannelDetail({
                     {story.eventCount} 个事件 · {story.sourceCount} 个来源 · {story.sourceDomainCount} 个域名
                   </small>
                   <span className="story-summary">{story.summary}</span>
-                  {story.qualityFlags.length ? (
+                  {qualityFlags.length ? (
                     <span className="flag-row">
-                      {story.qualityFlags.map((flag) => (
+                      {qualityFlags.map((flag) => (
                         <em key={flag}>{flagText(flag)}</em>
                       ))}
                     </span>
@@ -208,7 +223,7 @@ export function ChannelDetail({
           })}
           {selected.storyGroups.length === 0 ? (
             <div className="empty-detail">
-              {enrichmentState?.message ?? "当前仅有结构化事件数据，来源元数据和故事组仍在补充。"}
+              {enrichmentState?.message ?? "当前仅有结构化事件数据，来源信息和主要报道仍在补充。"}
             </div>
           ) : null}
         </div>
@@ -237,18 +252,14 @@ export function ChannelDetail({
             <dt>旧文风险</dt>
             <dd>{selected.explanation.sourceQuality.oldSourceCount}</dd>
           </div>
-          <div>
-            <dt>主题覆盖</dt>
-            <dd>{selected.explanation.sourceQuality.gkgCoveredSourceCount}</dd>
-          </div>
         </dl>
       </section>
 
       <section className="detail-section">
         <p className="eyebrow">不确定性</p>
-        {selected.explanation.uncertaintyWarnings.length ? (
+        {uncertaintyWarnings.length ? (
           <ul className="compact-list">
-            {selected.explanation.uncertaintyWarnings.map((warning) => (
+            {uncertaintyWarnings.map((warning) => (
               <li key={warning}>{warning}</li>
             ))}
           </ul>

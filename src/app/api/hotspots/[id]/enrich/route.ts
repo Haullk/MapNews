@@ -39,7 +39,7 @@ function startEnrichmentJob(id: number) {
     status: "running",
     startedAt: new Date().toISOString(),
     finishedAt: null,
-    message: "正在补充来源元数据、故事组和主题实体。",
+    message: "正在补充来源信息，并整理主要报道。",
     output: "",
   };
   jobs.set(id, job);
