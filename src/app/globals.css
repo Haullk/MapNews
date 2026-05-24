@@ -189,6 +189,37 @@ button {
   text-overflow: ellipsis;
 }
 
+.workspace-state,
+.workspace-error {
+  display: grid;
+  gap: 6px;
+  margin: 0 0 16px;
+  padding: 12px;
+  border: 1px solid #d8c9a8;
+  border-radius: 6px;
+  background: #fff9eb;
+  color: #75510f;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.workspace-state strong,
+.workspace-error h2 {
+  margin: 0;
+  color: #5f3f07;
+  font-size: 14px;
+}
+
+.workspace-state span,
+.workspace-error p,
+.workspace-error small {
+  color: #75510f;
+}
+
+.workspace-error {
+  margin: 16px;
+}
+
 .ranking-list {
   display: grid;
   gap: 8px;
@@ -811,6 +842,7 @@ button {
   --marker-color: var(--accent);
   outline: none;
   cursor: pointer;
+  transition: opacity 0.2s ease;
 }
 
 .hotspot-dot .hotspot-hit-area {
@@ -834,15 +866,7 @@ button {
   fill: var(--marker-color);
   stroke: #fff;
   stroke-width: 2;
-}
-
-.hotspot-dot text {
-  fill: #fff;
-  font-size: 12px;
-  font-weight: 850;
-  text-anchor: middle;
-  dominant-baseline: central;
-  pointer-events: none;
+  transition: r 0.25s ease, stroke-width 0.2s ease, filter 0.2s ease;
 }
 
 .hotspot-dot:focus-visible .hotspot-core,
@@ -1064,5 +1088,66 @@ button {
 
   .map-stage {
     min-height: 68vh;
+  }
+}
+
+@media (max-width: 768px) {
+  .toolbar {
+    gap: 10px;
+    padding: 12px 14px;
+  }
+
+  .brand-block h1 {
+    font-size: 19px;
+  }
+
+  .status-strip {
+    width: 100%;
+    min-height: 34px;
+    font-size: 13px;
+  }
+
+  .map-workspace {
+    min-height: auto;
+  }
+
+  .control-panel {
+    order: 2;
+    max-height: none;
+    padding: 12px;
+  }
+
+  .map-stage {
+    order: 1;
+    min-height: 60vh;
+  }
+
+  .filters-grid label,
+  .control-panel label,
+  .brief-text,
+  .detail-summary,
+  .muted-copy {
+    font-size: 14px;
+  }
+
+  .search-row {
+    grid-template-columns: minmax(0, 1fr) 68px;
+  }
+
+  .map-overlay {
+    left: 10px;
+    bottom: 10px;
+    max-width: calc(100% - 20px);
+    font-size: 12px;
+  }
+
+  .goldstein-legend {
+    right: 10px;
+    top: 10px;
+    max-width: 210px;
+  }
+
+  .hotspot-hover-card {
+    max-width: min(280px, calc(100vw - 24px));
   }
 }

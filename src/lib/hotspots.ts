@@ -180,6 +180,16 @@ export interface DataStatus {
   message: string;
 }
 
+export interface InitialWorkspaceData {
+  dates: string[];
+  channels: readonly string[];
+  databaseReady: boolean;
+  status: DataStatus;
+  initialHotspots: MapHotspot[];
+  initialHotspotStatus: QueryStatus;
+  initialBrief: DailyBrief | null;
+}
+
 export interface RegionTrendPoint {
   dataDate: string;
   isMissing: boolean;
@@ -434,19 +444,24 @@ export async function getDefaultDate(): Promise<string | null> {
   return result.rows[0]?.data_date ?? null;
 }
 
-export async function getInitialWorkspaceData() {
+export async function getInitialWorkspaceData(): Promise<InitialWorkspaceData> {
   try {
     const pool = getPool();
-    const [dates, channels, status] = await Promise.all([
+    const [dates, channels, status, hotspotResult, initialBrief] = await Promise.all([
       pool.query<{ data_date: string }>("select distinct data_date::text from map_hotspots order by data_date desc limit 90"),
       getAvailableChannels(),
       getDataStatus(),
+      queryMapHotspots({ limit: 500 }),
+      getDailyBrief(),
     ]);
     return {
       dates: dates.rows.map((row) => row.data_date),
       channels,
       databaseReady: status.databaseAvailable,
       status,
+      initialHotspots: hotspotResult.hotspots,
+      initialHotspotStatus: hotspotResult.status,
+      initialBrief,
     };
   } catch {
     return {
@@ -454,6 +469,13 @@ export async function getInitialWorkspaceData() {
       channels: DEFAULT_CHANNELS,
       databaseReady: false,
       status: databaseDownStatus(),
+      initialHotspots: [],
+      initialHotspotStatus: {
+        ok: false,
+        message: "数据库暂不可用，无法加载初始态势热点。",
+        emptyReason: "database_unavailable",
+      },
+      initialBrief: null,
     };
   }
 }

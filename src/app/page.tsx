@@ -1,4 +1,5 @@
 import { NewsMap } from "@/components/news-map";
+import { ErrorBoundary } from "@/components/shared/error-boundary";
 import { getInitialWorkspaceData } from "@/lib/hotspots";
 
 export default async function Home() {
@@ -18,12 +19,17 @@ export default async function Home() {
         </div>
       </section>
 
-      <NewsMap
-        dates={workspace.dates}
-        channels={workspace.channels}
-        databaseReady={workspace.databaseReady}
-        initialStatus={workspace.status}
-      />
+      <ErrorBoundary>
+        <NewsMap
+          dates={workspace.dates}
+          channels={workspace.channels}
+          databaseReady={workspace.databaseReady}
+          initialStatus={workspace.status}
+          initialHotspots={workspace.initialHotspots}
+          initialHotspotStatus={workspace.initialHotspotStatus}
+          initialBrief={workspace.initialBrief}
+        />
+      </ErrorBoundary>
     </main>
   );
 }

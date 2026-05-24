@@ -9,67 +9,40 @@ import {
   useRef,
   useState,
 } from "react";
-import { geoBounds, geoCentroid, geoMercator, geoPath } from "d3-geo";
+import { geoPath } from "d3-geo";
 import type { GeoPermissibleObjects, GeoProjection } from "d3-geo";
 import type { Feature, FeatureCollection, Geometry, Point } from "geojson";
-import type { DataStatus, DailyBrief, HotspotDetail, MapHotspot, RegionTrend } from "@/lib/hotspots";
+import {
+  labelFor,
+  numberValue,
+  useMapGeometry,
+  type MapAssets,
+  type MapBounds,
+  type MapProperties,
+  type MapSize,
+  type MapView,
+} from "@/components/hooks/use-map-geometry";
+import type { HotspotMarkerView } from "@/components/map/hotspot-layer";
+import { useWorkspaceData } from "@/components/hooks/use-workspace-data";
+import { MapRenderer } from "@/components/map/map-renderer";
+import { RankingList } from "@/components/panel/ranking-list";
+import { RegionTrendPanel } from "@/components/panel/region-trend-panel";
+import type { DataStatus, DailyBrief, HotspotDetail, MapHotspot, QueryStatus, RegionTrend } from "@/lib/hotspots";
 
 interface NewsMapProps {
   dates: string[];
   channels: readonly string[];
   databaseReady: boolean;
   initialStatus: DataStatus;
+  initialHotspots: MapHotspot[];
+  initialHotspotStatus: QueryStatus;
+  initialBrief: DailyBrief | null;
 }
 
 interface Filters {
   date: string;
   channel: string;
   region: string;
-}
-
-interface MapProperties {
-  id?: string;
-  name?: string;
-  name_ascii?: string;
-  name_en?: string;
-  name_zh?: string;
-  admin?: string;
-  country?: string;
-  country_code?: string;
-  continent?: string;
-  region?: string;
-  latitude?: number;
-  longitude?: number;
-  population?: number;
-  labelrank?: number;
-  min_zoom?: number;
-  capital?: number;
-  worldcity?: number;
-  megacity?: number;
-}
-
-interface MapAssets {
-  countries: FeatureCollection<Geometry, MapProperties>;
-  regions: FeatureCollection<Geometry, MapProperties>;
-  places: FeatureCollection<Point, MapProperties>;
-}
-
-interface MapSize {
-  width: number;
-  height: number;
-}
-
-interface MapView {
-  x: number;
-  y: number;
-  k: number;
-}
-
-interface MapBounds {
-  x0: number;
-  y0: number;
-  x1: number;
-  y1: number;
 }
 
 interface SearchTarget {
@@ -84,40 +57,15 @@ interface SearchTarget {
   population?: number;
 }
 
-type HotspotsPayload = { hotspots: MapHotspot[]; status: { message: string; ok: boolean } };
 type RegionTrendPayload = { trend: RegionTrend };
-type LoadMode = "full" | "hotspots" | "viewport";
 type PanelView = "ranking" | "detail";
 type EnrichmentState = {
   hotspotId: number;
   status: "running" | "success" | "error";
   message: string;
 };
-type HotspotMarker = {
-  markerKey: string;
-  hotspot: MapHotspot;
-  x: number;
-  y: number;
-  color: string;
-  sizePx: number;
-  ringRadius: number;
-  themeSummary: string;
-  goldsteinText: string;
-  heatIntensity: number;
-  trendGlowRadius: number;
-  trendGlowOpacity: number;
-  collisionRadius: number;
-  selected: boolean;
-  hovered: boolean;
-};
-
 const MAP_VIEW_MIN_ZOOM = 1;
 const MAP_VIEW_MAX_ZOOM = 40;
-const REGION_BOUNDARY_ZOOM = 2.8;
-const COUNTRY_LABEL_MAX_ZOOM = 3.1;
-const REGION_LABEL_MIN_ZOOM = 3.4;
-const REGION_LABEL_MAX_ZOOM = 6.4;
-const PLACE_LABEL_ZOOM = 5.1;
 
 const CHANNEL_COLORS: Record<string, string> = {
   国际: "#0f8f7f",
@@ -183,18 +131,9 @@ function uniqueStrings(values: Array<string | undefined | null>) {
   return Array.from(new Set(values.filter((value): value is string => Boolean(value && value.trim()))));
 }
 
-function labelFor(properties: MapProperties) {
-  return properties.name_zh || properties.name_en || properties.name_ascii || properties.name || "未命名地区";
-}
-
 function queryNameFor(properties: MapProperties) {
   const countryCode = properties.id || properties.country_code || "";
   return COUNTRY_QUERY_NAMES[countryCode] || properties.name_en || properties.name_ascii || properties.name || labelFor(properties);
-}
-
-function numberValue(value: unknown) {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : 0;
 }
 
 function clamp(value: number, min: number, max: number) {
@@ -285,98 +224,6 @@ function formatGoldstein(value: number | null) {
   return `${value > 0 ? "+" : ""}${value.toFixed(1)}`;
 }
 
-function trendLinePath(
-  points: RegionTrend["points"],
-  valueForPoint: (point: RegionTrend["points"][number]) => number | null,
-  minValue: number,
-  maxValue: number,
-) {
-  if (points.length === 0) return "";
-  const left = 8;
-  const right = 292;
-  const top = 10;
-  const bottom = 66;
-  const width = right - left;
-  const height = bottom - top;
-  const span = Math.max(1, maxValue - minValue);
-  let drawing = false;
-  const commands: string[] = [];
-  points.forEach((point, index) => {
-    const value = valueForPoint(point);
-    if (value === null || !Number.isFinite(value)) {
-      drawing = false;
-      return;
-    }
-    const x = left + (points.length === 1 ? width / 2 : (index / (points.length - 1)) * width);
-    const y = bottom - clamp((value - minValue) / span, 0, 1) * height;
-    commands.push(`${drawing ? "L" : "M"} ${x.toFixed(1)} ${y.toFixed(1)}`);
-    drawing = true;
-  });
-  return commands.join(" ");
-}
-
-function RegionTrendPanel({ trend, message }: { trend: RegionTrend | null; message: string | null }) {
-  if (message && !trend) {
-    return <div className="empty-detail">{message}</div>;
-  }
-  if (!trend || trend.points.length === 0) {
-    return <div className="empty-detail">暂无可用趋势数据。</div>;
-  }
-
-  const availablePoints = trend.points.filter((point) => !point.isMissing);
-  const maxHeat = Math.max(...trend.points.map((point) => point.heatScore), 1);
-  const heatPath = trendLinePath(trend.points, (point) => point.heatScore, 0, maxHeat);
-  const goldsteinPath = trendLinePath(trend.points, (point) => point.weightedGoldstein, -10, 10);
-  const latestPoint = [...trend.points].reverse().find((point) => !point.isMissing);
-
-  return (
-    <div className="trend-panel">
-      <div className="trend-panel-heading">
-        <span>近 {trend.days} 天</span>
-        <strong>{availablePoints.length}/{trend.points.length} 天有数据</strong>
-      </div>
-      <div className="trend-chart">
-        <div className="trend-chart-title">
-          <span>热度趋势</span>
-          <strong>{latestPoint ? latestPoint.heatScore.toFixed(1) : "暂无"}</strong>
-        </div>
-        <svg viewBox="0 0 300 76" role="img" aria-label={`${trend.regionName} 热度趋势`}>
-          <line className="trend-axis" x1="8" y1="66" x2="292" y2="66" />
-          <path className="trend-line heat" d={heatPath} />
-        </svg>
-      </div>
-      <div className="trend-chart">
-        <div className="trend-chart-title">
-          <span>态势趋势</span>
-          <strong>{latestPoint ? formatGoldstein(latestPoint.weightedGoldstein) : "暂无"}</strong>
-        </div>
-        <svg viewBox="0 0 300 76" role="img" aria-label={`${trend.regionName} GDELT 态势趋势`}>
-          <line className="trend-axis" x1="8" y1="38" x2="292" y2="38" />
-          <path className="trend-line goldstein" d={goldsteinPath} />
-          {trend.points.map((point, index) => {
-            if (point.weightedGoldstein === null) return null;
-            const x = 8 + (trend.points.length === 1 ? 142 : (index / (trend.points.length - 1)) * 284);
-            const y = 66 - clamp((point.weightedGoldstein + 10) / 20, 0, 1) * 56;
-            return (
-              <circle
-                key={point.dataDate}
-                cx={x}
-                cy={y}
-                r={2.4}
-                fill={goldsteinColor(point.weightedGoldstein)}
-              />
-            );
-          })}
-        </svg>
-      </div>
-      <div className="trend-meta">
-        <span>{trend.startDate ?? "暂无"} 至 {trend.endDate ?? "暂无"}</span>
-        <span>缺失日期按 0 热度展示</span>
-      </div>
-    </div>
-  );
-}
-
 function hotspotLimitForZoom(zoom: number) {
   if (zoom <= 1.4) return 90;
   if (zoom <= 2.2) return 160;
@@ -399,11 +246,11 @@ function hotspotSpacingForZoom(zoom: number) {
   return 2;
 }
 
-function declutterHotspotMarkers(markers: HotspotMarker[], zoom: number) {
+function declutterHotspotMarkers(markers: HotspotMarkerView[], zoom: number) {
   const maxVisible = hotspotLimitForZoom(zoom);
   const spacing = hotspotSpacingForZoom(zoom);
   const selected = markers.find((marker) => marker.selected);
-  const kept: HotspotMarker[] = [];
+  const kept: HotspotMarkerView[] = [];
   const sortedMarkers = [...markers]
     .filter((marker) => marker !== selected)
     .sort((a, b) => b.hotspot.heatScore - a.hotspot.heatScore);
@@ -509,23 +356,6 @@ function clampMapView(view: MapView, size: MapSize, bounds: MapBounds | null) {
   };
 }
 
-function featureKey(feature: Feature<Geometry, MapProperties>, prefix: string, index: number) {
-  return `${prefix}-${feature.properties?.id ?? feature.properties?.name_en ?? feature.properties?.name ?? index}`;
-}
-
-function featureLabelPosition(
-  projection: GeoProjection | null,
-  view: MapView,
-  feature: Feature<Geometry, MapProperties>,
-) {
-  try {
-    const [lng, lat] = geoCentroid(feature as GeoPermissibleObjects);
-    return screenPoint(projection, view, lng, lat);
-  } catch {
-    return null;
-  }
-}
-
 function isScreenVisible(point: [number, number] | null, size: MapSize, margin = 40) {
   if (!point) return false;
   return point[0] >= -margin && point[0] <= size.width + margin && point[1] >= -margin && point[1] <= size.height + margin;
@@ -541,34 +371,6 @@ function viewportKey(projection: GeoProjection | null, view: MapView, size: MapS
     bbox.north.toFixed(2),
     view.k.toFixed(2),
   ].join(",");
-}
-
-function isProjectedBoundsVisible(bounds: [[number, number], [number, number]], view: MapView, size: MapSize, margin = 80) {
-  const x0 = bounds[0][0] * view.k + view.x;
-  const y0 = bounds[0][1] * view.k + view.y;
-  const x1 = bounds[1][0] * view.k + view.x;
-  const y1 = bounds[1][1] * view.k + view.y;
-  return Math.max(x0, x1) >= -margin && Math.min(x0, x1) <= size.width + margin &&
-    Math.max(y0, y1) >= -margin && Math.min(y0, y1) <= size.height + margin;
-}
-
-function keepSeparatedLabels<T extends { point: [number, number] | null }>(items: T[], minDistance: number, limit: number) {
-  const kept: T[] = [];
-  const minDistanceSquared = minDistance * minDistance;
-  for (const item of items) {
-    const point = item.point;
-    if (!point) continue;
-    const overlaps = kept.some((keptItem) => {
-      const keptPoint = keptItem.point;
-      if (!keptPoint) return false;
-      const dx = point[0] - keptPoint[0];
-      const dy = point[1] - keptPoint[1];
-      return dx * dx + dy * dy < minDistanceSquared;
-    });
-    if (!overlaps) kept.push(item);
-    if (kept.length >= limit) break;
-  }
-  return kept;
 }
 
 function buildSearchTargets(assets: MapAssets | null): SearchTarget[] {
@@ -666,19 +468,18 @@ function findSearchTarget(query: string, targets: SearchTarget[]) {
   return best?.target ?? null;
 }
 
-export function NewsMap({ dates, channels, databaseReady, initialStatus }: NewsMapProps) {
+export function NewsMap({
+  dates,
+  channels,
+  databaseReady,
+  initialStatus,
+  initialHotspots,
+  initialHotspotStatus,
+  initialBrief,
+}: NewsMapProps) {
   const mapEl = useRef<HTMLDivElement | null>(null);
-  const abortRef = useRef<AbortController | null>(null);
   const trendAbortRef = useRef<AbortController | null>(null);
-  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const requestIdRef = useRef(0);
-  const preserveRankingUntilRef = useRef(0);
   const enrichmentPollRef = useRef<Map<number, boolean>>(new Map());
-  const initialLoadRef = useRef(false);
-  const loadWorkspaceRef = useRef<(mode?: LoadMode) => void>(() => undefined);
-  const briefCacheRef = useRef<Map<string, DailyBrief>>(new Map());
-  const statusCacheRef = useRef<DataStatus | null>(initialStatus);
-  const previousFiltersRef = useRef<Filters | null>(null);
   const projectionRef = useRef<GeoProjection | null>(null);
   const mapBoundsRef = useRef<MapBounds | null>(null);
   const sizeRef = useRef<MapSize>({ width: 0, height: 0 });
@@ -686,16 +487,12 @@ export function NewsMap({ dates, channels, databaseReady, initialStatus }: NewsM
   const pendingMapViewRef = useRef<MapView | null>(null);
   const mapFrameRef = useRef<number | null>(null);
   const dragRef = useRef<{ pointerId: number; x: number; y: number; moved: boolean } | null>(null);
-  const previousViewportRef = useRef<string | null>(null);
 
   const [assets, setAssets] = useState<MapAssets | null>(null);
   const [mapLoadError, setMapLoadError] = useState<string | null>(null);
   const [size, setSize] = useState<MapSize>({ width: 0, height: 0 });
   const [mapView, setMapViewState] = useState<MapView>({ x: 0, y: 0, k: 1 });
   const [dragging, setDragging] = useState(false);
-  const [hotspots, setHotspots] = useState<MapHotspot[]>([]);
-  const [ranking, setRanking] = useState<MapHotspot[]>([]);
-  const [brief, setBrief] = useState<DailyBrief | null>(null);
   const [selectedRegion, setSelectedRegion] = useState<MapHotspot | null>(null);
   const [selected, setSelected] = useState<HotspotDetail | null>(null);
   const [regionTrend, setRegionTrend] = useState<RegionTrend | null>(null);
@@ -704,32 +501,63 @@ export function NewsMap({ dates, channels, databaseReady, initialStatus }: NewsM
   const [expandedStoryId, setExpandedStoryId] = useState<number | null>(null);
   const [panelView, setPanelView] = useState<PanelView>("ranking");
   const [enrichmentState, setEnrichmentState] = useState<EnrichmentState | null>(null);
-  const [status, setStatus] = useState<DataStatus>(initialStatus);
-  const [loading, setLoading] = useState(false);
-  const [message, setMessage] = useState<string | null>(null);
   const [searchText, setSearchText] = useState("");
   const [searchMessage, setSearchMessage] = useState<string | null>(null);
   const [filters, setFilters] = useState<Filters>({ date: dates[0] ?? "", channel: "", region: "" });
 
-  const projection = useMemo(() => {
-    if (!assets || size.width <= 0 || size.height <= 0) return null;
-    return geoMercator().fitExtent(
-      [
-        [28, 24],
-        [size.width - 28, size.height - 24],
-      ],
-      assets.countries as GeoPermissibleObjects,
-    );
-  }, [assets, size]);
-
-  const path = useMemo(() => (projection ? geoPath(projection) : null), [projection]);
-  const mapContentBounds = useMemo(() => {
-    if (!assets || !path) return null;
-    const [[x0, y0], [x1, y1]] = path.bounds(assets.countries as GeoPermissibleObjects);
-    return { x0, y0, x1, y1 };
-  }, [assets, path]);
+  const { projection, mapContentBounds, countryPaths, regionPaths, mapLabels } = useMapGeometry(assets, size, mapView);
   const mapReady = Boolean(assets && projection && size.width > 0 && size.height > 0);
-  const selectedRegionKey = selectedRegion ? `${selectedRegion.dataDate}-${selectedRegion.regionKey}` : null;
+  const queryParams = useCallback(
+    (withBounds: boolean) => {
+      const params = new URLSearchParams();
+      if (filters.date) params.set("date", filters.date);
+      if (filters.channel) params.set("channel", filters.channel);
+      if (filters.region) params.set("region", filters.region);
+      if (withBounds) {
+        const bbox = bboxFromView(projectionRef.current, mapViewRef.current, sizeRef.current);
+        if (bbox && bbox.east > bbox.west && bbox.north > bbox.south) {
+          params.set("west", String(bbox.west));
+          params.set("south", String(bbox.south));
+          params.set("east", String(bbox.east));
+          params.set("north", String(bbox.north));
+        }
+      }
+      return params;
+    },
+    [filters],
+  );
+  const briefParams = useCallback(() => {
+    const params = new URLSearchParams();
+    if (filters.date) params.set("date", filters.date);
+    return params;
+  }, [filters.date]);
+  const currentViewportKey = mapReady ? viewportKey(projection, mapView, size) : null;
+  const hasInitialWorkspacePayload =
+    initialHotspotStatus.ok || initialHotspots.length > 0 || initialBrief !== null || !databaseReady;
+  const {
+    hotspots,
+    ranking,
+    brief,
+    status,
+    loading,
+    message,
+    setMessage,
+    scheduleHotspotLoad,
+    preserveRankingForViewport,
+  } = useWorkspaceData({
+    databaseReady,
+    mapReady,
+    filters,
+    initialStatus,
+    initialHotspots,
+    initialHotspotStatus,
+    initialBrief,
+    hasInitialWorkspacePayload,
+    viewportKey: currentViewportKey,
+    queryParams,
+    briefParams,
+  });
+  const selectedRegionKey = selectedRegion ? selectedRegion.regionKey : null;
   const selectedRegionMaxQuadEvents = Math.max(
     ...(selectedRegion?.quadClassBreakdown.map((item) => item.eventCount) ?? []),
     1,
@@ -761,120 +589,13 @@ export function NewsMap({ dates, channels, databaseReady, initialStatus }: NewsM
     selected && enrichmentState?.hotspotId === selected.id ? enrichmentState : null;
   const searchTargets = useMemo(() => buildSearchTargets(assets), [assets]);
 
-  const countryPaths = useMemo(() => {
-    if (!assets || !path) return [];
-    return assets.countries.features.map((feature, index) => ({
-      key: featureKey(feature, "country", index),
-      label: labelFor(feature.properties ?? {}),
-      d: path(feature as GeoPermissibleObjects) ?? "",
-      feature,
-      labelrank: numberValue(feature.properties?.labelrank),
-    }));
-  }, [assets, path]);
-
-  const allRegionPaths = useMemo(() => {
-    if (!assets || !path) return [];
-    return assets.regions.features.map((feature, index) => {
-      const permissibleFeature = feature as GeoPermissibleObjects;
-      return {
-        key: featureKey(feature, "region", index),
-        label: labelFor(feature.properties ?? {}),
-        d: path(permissibleFeature) ?? "",
-        bounds: path.bounds(permissibleFeature) as [[number, number], [number, number]],
-        feature,
-        labelrank: numberValue(feature.properties?.labelrank),
-      };
-    });
-  }, [assets, path]);
-
-  const regionPaths = useMemo(() => {
-    if (mapView.k < REGION_BOUNDARY_ZOOM) return [];
-    return allRegionPaths.filter((item) => isProjectedBoundsVisible(item.bounds, mapView, size));
-  }, [allRegionPaths, mapView, size]);
-
-  const mapLabels = useMemo(() => {
-    if (!assets || !projection) return [];
-    const labels: Array<{ key: string; label: string; x: number; y: number; kind: "country" | "region" | "place" }> = [];
-
-    if (mapView.k < COUNTRY_LABEL_MAX_ZOOM) {
-      const countryLabelRank = mapView.k < 1.7 ? 2 : 3;
-      const countryLimit = mapView.k < 1.7 ? 18 : 28;
-      const countryCandidates = countryPaths
-        .filter((item) => item.labelrank <= countryLabelRank)
-        .map((item) => ({
-          key: `label-${item.key}`,
-          label: item.label,
-          point: featureLabelPosition(projection, mapView, item.feature),
-          rank: item.labelrank,
-        }))
-        .filter((item) => isScreenVisible(item.point, size))
-        .sort((a, b) => a.rank - b.rank);
-      for (const item of keepSeparatedLabels(countryCandidates, 78, countryLimit)) {
-        labels.push({ key: item.key, label: item.label, x: item.point![0], y: item.point![1], kind: "country" });
-      }
-    }
-
-    if (mapView.k >= REGION_LABEL_MIN_ZOOM && mapView.k < REGION_LABEL_MAX_ZOOM) {
-      const regionCandidates = assets.regions.features
-        .filter((feature) => numberValue(feature.properties?.labelrank) <= 3)
-        .map((feature, index) => {
-          const point = featureLabelPosition(projection, mapView, feature);
-          return {
-            key: `region-label-${feature.properties?.id ?? index}`,
-            label: labelFor(feature.properties ?? {}),
-            point,
-            rank: numberValue(feature.properties?.labelrank),
-          };
-        })
-        .filter((item) => isScreenVisible(item.point, size, 20))
-        .sort((a, b) => a.rank - b.rank);
-      for (const item of keepSeparatedLabels(regionCandidates, 62, 24)) {
-        labels.push({ key: item.key, label: item.label, x: item.point![0], y: item.point![1], kind: "region" });
-      }
-    }
-
-    if (mapView.k >= PLACE_LABEL_ZOOM) {
-      const placeLimit = mapView.k >= 12 ? 75 : mapView.k >= 8 ? 52 : 30;
-      const placeMinPopulation = mapView.k >= 12 ? 500_000 : mapView.k >= 8 ? 1_000_000 : 4_000_000;
-      const placeCandidates = assets.places.features
-        .filter((feature) => {
-          const properties = feature.properties ?? {};
-          return (
-            numberValue(properties.capital) === 1 ||
-            numberValue(properties.worldcity) === 1 ||
-            numberValue(properties.megacity) === 1 ||
-            numberValue(properties.population) >= placeMinPopulation
-          );
-        })
-        .map((feature, index) => {
-          const [lng, lat] = feature.geometry.coordinates;
-          const countryCode = feature.properties?.country_code ?? "unknown";
-          const name = feature.properties?.name_ascii ?? feature.properties?.name_en ?? feature.properties?.name ?? index;
-          const point = screenPoint(projection, mapView, lng, lat);
-          return {
-            key: `place-label-${countryCode}-${name}-${lng.toFixed(3)}-${lat.toFixed(3)}-${index}`,
-            label: labelFor(feature.properties ?? {}),
-            point,
-            population: numberValue(feature.properties?.population),
-          };
-        })
-        .filter((item) => isScreenVisible(item.point, size, 18))
-        .sort((a, b) => b.population - a.population);
-      for (const item of keepSeparatedLabels(placeCandidates, mapView.k >= 10 ? 48 : 58, placeLimit)) {
-        labels.push({ key: item.key, label: item.label, x: item.point![0], y: item.point![1], kind: "place" });
-      }
-    }
-
-    return labels;
-  }, [assets, countryPaths, mapView, projection, size]);
-
   const hotspotMarkers = useMemo(() => {
     if (!projection) return [];
     const candidateMarkers = candidateHotspots
       .map((hotspot) => {
         const point = screenPoint(projection, mapView, hotspot.lng, hotspot.lat);
         if (!isScreenVisible(point, size, 18)) return null;
-        const markerKey = `${hotspot.dataDate}-${hotspot.regionKey}`;
+        const markerKey = hotspot.regionKey;
         const selected = markerKey === selectedRegionKey;
         const hovered = markerKey === hoveredRegionKey;
         const color = goldsteinColor(hotspot.weightedGoldstein);
@@ -980,143 +701,6 @@ export function NewsMap({ dates, channels, databaseReady, initialStatus }: NewsM
   useEffect(() => {
     projectionRef.current = projection;
   }, [projection]);
-
-  const queryParams = useCallback(
-    (withBounds: boolean) => {
-      const params = new URLSearchParams();
-      if (filters.date) params.set("date", filters.date);
-      if (filters.channel) params.set("channel", filters.channel);
-      if (filters.region) params.set("region", filters.region);
-      if (withBounds) {
-        const bbox = bboxFromView(projectionRef.current, mapViewRef.current, sizeRef.current);
-        if (bbox && bbox.east > bbox.west && bbox.north > bbox.south) {
-          params.set("west", String(bbox.west));
-          params.set("south", String(bbox.south));
-          params.set("east", String(bbox.east));
-          params.set("north", String(bbox.north));
-        }
-      }
-      return params;
-    },
-    [filters],
-  );
-
-  const briefParams = useCallback(() => {
-    const params = new URLSearchParams();
-    if (filters.date) params.set("date", filters.date);
-    return params;
-  }, [filters.date]);
-
-  const loadWorkspace = useCallback(async (mode: LoadMode = "full") => {
-    if (!databaseReady || !mapReady) return;
-    abortRef.current?.abort();
-    const requestId = requestIdRef.current + 1;
-    requestIdRef.current = requestId;
-    const controller = new AbortController();
-    abortRef.current = controller;
-    setLoading(true);
-    try {
-      const hotspotResponse = await fetch(`/api/hotspots?${queryParams(true).toString()}`, {
-        cache: "no-store",
-        signal: controller.signal,
-      });
-      const hotspotPayload = (await hotspotResponse.json()) as HotspotsPayload;
-      if (requestId !== requestIdRef.current) return;
-      if (!hotspotResponse.ok) {
-        throw new Error(hotspotPayload.status.message);
-      }
-      setHotspots(hotspotPayload.hotspots);
-      if (mode !== "viewport") {
-        setRanking(hotspotPayload.hotspots.slice(0, 20));
-      }
-      setMessage(hotspotPayload.status.message);
-
-      if (mode === "hotspots" || mode === "viewport") return;
-
-      const briefKey = filters.date || "__default__";
-      const cachedBrief = briefCacheRef.current.get(briefKey);
-      const cachedStatus = statusCacheRef.current;
-      if (cachedBrief && cachedStatus) {
-        setBrief(cachedBrief);
-        setStatus(cachedStatus);
-        return;
-      }
-
-      const briefRequest = cachedBrief
-        ? Promise.resolve<{ brief: DailyBrief }>({ brief: cachedBrief })
-        : fetch(`/api/daily-brief?${briefParams().toString()}`, {
-            cache: "no-store",
-            signal: controller.signal,
-          }).then((response) => response.json() as Promise<{ brief: DailyBrief }>);
-      const statusRequest = cachedStatus
-        ? Promise.resolve<{ status: DataStatus }>({ status: cachedStatus })
-        : fetch("/api/data-status", {
-            cache: "no-store",
-            signal: controller.signal,
-          }).then((response) => response.json() as Promise<{ status: DataStatus }>);
-      const [briefPayload, statusPayload] = await Promise.all([briefRequest, statusRequest]);
-      if (requestId !== requestIdRef.current) return;
-      briefCacheRef.current.set(briefKey, briefPayload.brief);
-      statusCacheRef.current = statusPayload.status;
-      setBrief(briefPayload.brief);
-      setStatus(statusPayload.status);
-    } catch (error) {
-      if (error instanceof DOMException && error.name === "AbortError") return;
-      setMessage(error instanceof Error ? error.message : "热点数据加载失败");
-    } finally {
-      if (requestId === requestIdRef.current) {
-        setLoading(false);
-      }
-    }
-  }, [briefParams, databaseReady, filters.date, mapReady, queryParams]);
-
-  useEffect(() => {
-    loadWorkspaceRef.current = loadWorkspace;
-  }, [loadWorkspace]);
-
-  const scheduleHotspotLoad = useCallback(() => {
-    if (debounceRef.current) {
-      clearTimeout(debounceRef.current);
-    }
-    debounceRef.current = setTimeout(() => {
-      const mode: LoadMode = Date.now() < preserveRankingUntilRef.current ? "viewport" : "hotspots";
-      loadWorkspaceRef.current(mode);
-    }, 350);
-  }, []);
-
-  useEffect(() => {
-    if (!mapReady || initialLoadRef.current) return;
-    initialLoadRef.current = true;
-    previousViewportRef.current = viewportKey(projectionRef.current, mapViewRef.current, sizeRef.current);
-    loadWorkspace("full");
-  }, [loadWorkspace, mapReady]);
-
-  useEffect(() => {
-    if (!databaseReady || !mapReady || !initialLoadRef.current) return;
-    const key = viewportKey(projectionRef.current, mapViewRef.current, sizeRef.current);
-    if (!key || key === previousViewportRef.current) return;
-    previousViewportRef.current = key;
-    scheduleHotspotLoad();
-  }, [databaseReady, mapReady, mapView, scheduleHotspotLoad, size]);
-
-  useEffect(() => {
-    if (!databaseReady) return;
-    const previousFilters = previousFiltersRef.current;
-    previousFiltersRef.current = filters;
-    if (!previousFilters) return;
-    const mode: LoadMode = previousFilters.date === filters.date ? "hotspots" : "full";
-    if (debounceRef.current) {
-      clearTimeout(debounceRef.current);
-    }
-    debounceRef.current = setTimeout(() => {
-      loadWorkspace(mode);
-    }, 300);
-    return () => {
-      if (debounceRef.current) {
-        clearTimeout(debounceRef.current);
-      }
-    };
-  }, [databaseReady, filters, loadWorkspace]);
 
   useEffect(() => {
     trendAbortRef.current?.abort();
@@ -1324,7 +908,7 @@ export function NewsMap({ dates, channels, databaseReady, initialStatus }: NewsM
   }
 
   function locateRankingItem(item: MapHotspot) {
-    preserveRankingUntilRef.current = Date.now() + 1200;
+    preserveRankingForViewport(1200);
     zoomToPoint(item.lng, item.lat, 10.5);
     openRegionHotspot(item);
     scheduleHotspotLoad();
@@ -1369,11 +953,27 @@ export function NewsMap({ dates, channels, databaseReady, initialStatus }: NewsM
   }
 
   const baseMapTransform = `translate(${mapView.x} ${mapView.y}) scale(${mapView.k})`;
+  const workspaceNotice = !databaseReady
+    ? {
+        title: "数据库暂不可用",
+        body: status.message || "当前无法连接 PostgreSQL，地图会在数据服务恢复后自动显示真实热点。",
+      }
+    : !loading && hotspots.length === 0
+      ? status.currentDataDate || filters.date
+        ? {
+            title: "当前范围暂无态势热点",
+            body: message ?? "当前日期、主题、地区或地图范围没有匹配结果，可调整筛选或缩放地图。",
+          }
+        : {
+            title: "暂无可展示数据",
+            body: "数据库已连接，但还没有可展示的地图热点。请先运行 GDELT 导入和清洗任务。",
+          }
+      : null;
   const mapOverlayText = mapLoadError
     ? mapLoadError
-    : loading
+    : loading && hotspots.length === 0
       ? "正在加载热点..."
-      : `${message ?? status.message} · 当前地图显示 ${hotspotMarkers.length}/${hotspots.length} 个热点`;
+      : `${loading ? "正在刷新热点..." : message ?? status.message} · 当前地图显示 ${hotspotMarkers.length}/${hotspots.length} 个热点`;
 
   return (
     <section className="map-workspace">
@@ -1447,6 +1047,13 @@ export function NewsMap({ dates, channels, databaseReady, initialStatus }: NewsM
           </div>
         </div>
 
+        {workspaceNotice ? (
+          <div className="workspace-state">
+            <strong>{workspaceNotice.title}</strong>
+            <span>{workspaceNotice.body}</span>
+          </div>
+        ) : null}
+
         <div className="panel-tabs" role="tablist" aria-label="侧栏视图">
           <button
             type="button"
@@ -1466,38 +1073,16 @@ export function NewsMap({ dates, channels, databaseReady, initialStatus }: NewsM
         </div>
 
         {panelView === "ranking" ? (
-          <div className="sidebar-section">
-            <div className="section-heading">
-              <p className="eyebrow">态势排行</p>
-              <span>
-                地图显示 {hotspotMarkers.length}/{hotspots.length}
-              </span>
-            </div>
-            <div className="ranking-list">
-              {ranking.map((item) => (
-                <button
-                  key={item.id}
-                  type="button"
-                  className="ranking-item"
-                  style={{ "--situation-color": goldsteinColor(item.weightedGoldstein) } as React.CSSProperties}
-                  onClick={() => locateRankingItem(item)}
-                >
-                  <span>{item.regionName}</span>
-                  <strong>
-                    <i className="situation-dot" />
-                    GDELT {formatGoldstein(item.weightedGoldstein)} · {item.trendLabel}
-                  </strong>
-                  <small>
-                    {item.eventCount} 个事件 · {item.sourceCount} 个来源 · 主主题 {themeLabel(item.channel)}
-                  </small>
-                  <i className="heat-bar">
-                    <b style={{ width: `${Math.max(8, Math.round((item.heatScore / maxRankingHeat) * 100))}%` }} />
-                  </i>
-                </button>
-              ))}
-              {ranking.length === 0 ? <div className="empty-detail">当前筛选下暂无热点排行。</div> : null}
-            </div>
-          </div>
+          <RankingList
+            items={ranking}
+            maxHeat={maxRankingHeat}
+            visibleMarkerCount={hotspotMarkers.length}
+            totalHotspotCount={hotspots.length}
+            onLocate={locateRankingItem}
+            goldsteinColor={goldsteinColor}
+            formatGoldstein={formatGoldstein}
+            themeLabel={themeLabel}
+          />
         ) : selectedRegion ? (
           <article className="detail-panel">
             <div className="detail-hero region-detail-hero">
@@ -1789,133 +1374,34 @@ export function NewsMap({ dates, channels, databaseReady, initialStatus }: NewsM
         )}
       </aside>
 
-      <div className="map-stage" ref={mapEl}>
-        {mapReady ? (
-          <svg
-            className={`map-canvas ${dragging ? "dragging" : ""}`}
-            role="img"
-            aria-label="全球态势热点地图"
-            viewBox={`0 0 ${size.width} ${size.height}`}
-            onWheel={handleWheel}
-            onPointerDown={handlePointerDown}
-            onPointerMove={handlePointerMove}
-            onPointerUp={handlePointerUp}
-            onPointerCancel={handlePointerUp}
-          >
-            <rect className="map-ocean" width={size.width} height={size.height} />
-            <g className="map-base-layer" transform={baseMapTransform}>
-              {countryPaths.map((item) => (
-                <path key={item.key} className="map-country" d={item.d} />
-              ))}
-              {regionPaths.map((item) => (
-                <path key={item.key} className="map-region" d={item.d} />
-              ))}
-            </g>
-            <g className="map-label-layer" aria-hidden="true">
-              {mapLabels.map((label) => (
-                <text key={label.key} className={`map-label ${label.kind}`} x={label.x} y={label.y}>
-                  {label.label}
-                </text>
-              ))}
-            </g>
-            <g className="hotspot-layer">
-              {hotspotMarkers.map(({ markerKey, hotspot, x, y, color, sizePx, ringRadius, themeSummary, goldsteinText, trendGlowRadius, trendGlowOpacity, selected, hovered }) => (
-                <g
-                  key={`${hotspot.dataDate}-${hotspot.regionKey}`}
-                  role="button"
-                  tabIndex={0}
-                  aria-label={`${hotspot.regionName} 态势热点，GDELT 态势倾向 ${goldsteinText}，${hotspot.trendLabel}，主主题 ${themeLabel(hotspot.channel)}。${themeSummary}`}
-                  className={`hotspot-dot ${selected ? "selected" : ""} ${hovered ? "hovered" : ""} ${trendClassName(hotspot.trendLabel)}`}
-                  transform={`translate(${x} ${y})`}
-                  style={{ "--marker-color": color, "--marker-size": `${sizePx}px` } as React.CSSProperties}
-                  onPointerDown={(event) => event.stopPropagation()}
-                  onPointerOver={() => setHoveredRegionKey(markerKey)}
-                  onPointerEnter={() => setHoveredRegionKey(markerKey)}
-                  onPointerMove={() => setHoveredRegionKey(markerKey)}
-                  onPointerLeave={() => setHoveredRegionKey((current) => (current === markerKey ? null : current))}
-                  onMouseOver={() => setHoveredRegionKey(markerKey)}
-                  onMouseEnter={() => setHoveredRegionKey(markerKey)}
-                  onMouseMove={() => setHoveredRegionKey(markerKey)}
-                  onMouseLeave={() => setHoveredRegionKey((current) => (current === markerKey ? null : current))}
-                  onFocus={() => setHoveredRegionKey(markerKey)}
-                  onBlur={() => setHoveredRegionKey((current) => (current === markerKey ? null : current))}
-                  onClick={() => openRegionHotspot(hotspot)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter" || event.key === " ") {
-                      event.preventDefault();
-                      openRegionHotspot(hotspot);
-                    }
-                  }}
-                >
-                  <title>{hotspot.summary}</title>
-                  <circle className="hotspot-hit-area" r={Math.max(28, ringRadius + 8)} />
-                  <circle
-                    className="hotspot-heat-glow"
-                    r={trendGlowRadius}
-                    opacity={trendGlowOpacity}
-                  />
-                  <circle className="hotspot-halo" r={ringRadius + 6} />
-                  <circle className="hotspot-core" r={sizePx / 2} />
-                </g>
-              ))}
-            </g>
-          </svg>
-        ) : (
-          <div className="map-placeholder">{mapLoadError ?? "正在加载本地地图。"}</div>
-        )}
-        {hoveredMarker ? (
-          <div
-            className="hotspot-hover-card"
-            style={{
-              left: `${clamp(hoveredMarker.x + 16, 12, Math.max(12, size.width - 302))}px`,
-              top: `${clamp(hoveredMarker.y - 112, 12, Math.max(12, size.height - 220))}px`,
-              "--situation-color": hoveredMarker.color,
-            } as React.CSSProperties}
-          >
-            <strong>{hoveredMarker.hotspot.regionName}</strong>
-            <span>
-              <i />
-              GDELT {formatGoldstein(hoveredMarker.hotspot.weightedGoldstein)} · {goldsteinToneLabel(hoveredMarker.hotspot.weightedGoldstein)}
-            </span>
-            <small>
-              主导象限 {hoveredMarker.hotspot.quadClassLabel} · {hoveredMarker.hotspot.trendLabel}
-            </small>
-            {hoveredMarker.hotspot.quadClassBreakdown.length ? (
-              <div className="hover-quad-list" aria-label="QuadClass 四象限占比">
-                {hoveredMarker.hotspot.quadClassBreakdown.map((item) => (
-                  <span
-                    key={item.quadClass}
-                    className="hover-quad-row"
-                    style={{ "--situation-color": QUAD_CLASS_COLORS[item.quadClass] ?? "#64748b" } as React.CSSProperties}
-                  >
-                    <em>{item.label}</em>
-                    <b>{Math.round(item.share * 100)}%</b>
-                    <i style={{ width: `${Math.max(4, Math.round(item.share * 100))}%` }} />
-                  </span>
-                ))}
-              </div>
-            ) : null}
-            <small>
-              热度 {hoveredMarker.hotspot.heatScore.toFixed(1)} · {hoveredMarker.hotspot.eventCount} 事件 · {hoveredMarker.hotspot.sourceCount} 来源
-            </small>
-            <small>
-              较昨日 {formatHeatDelta(hoveredMarker.hotspot.heatDelta)} · 主主题 {themeLabel(hoveredMarker.hotspot.channel)}
-            </small>
-          </div>
-        ) : null}
-        <div className="goldstein-legend" aria-label="GDELT 态势倾向图例">
-          <span>GDELT 态势倾向</span>
-          <i />
-          <div>
-            <b>冲突 -10</b>
-            <b>中性 0</b>
-            <b>合作 +10</b>
-          </div>
-          <small>事件信号聚合，不等同于现实世界结论</small>
-        </div>
-        <div className="map-overlay">{mapOverlayText}</div>
-        <div className="map-attribution">Natural Earth · 本地 GeoJSON</div>
-      </div>
+      <MapRenderer
+        mapRef={mapEl}
+        mapReady={mapReady}
+        mapLoadError={mapLoadError}
+        size={size}
+        dragging={dragging}
+        baseMapTransform={baseMapTransform}
+        countryPaths={countryPaths}
+        regionPaths={regionPaths}
+        mapLabels={mapLabels}
+        hotspotMarkers={hotspotMarkers}
+        hoveredMarker={hoveredMarker}
+        mapOverlayText={mapOverlayText}
+        onWheel={handleWheel}
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUp}
+        onHoverRegion={(markerKey) => {
+          setHoveredRegionKey((current) => (markerKey === null && current === null ? current : markerKey));
+        }}
+        onOpenRegion={openRegionHotspot}
+        trendClassName={trendClassName}
+        themeLabel={themeLabel}
+        formatGoldstein={formatGoldstein}
+        goldsteinToneLabel={goldsteinToneLabel}
+        formatHeatDelta={formatHeatDelta}
+        quadClassColors={QUAD_CLASS_COLORS}
+      />
     </section>
   );
 }
