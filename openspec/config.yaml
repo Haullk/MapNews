@@ -1,0 +1,40 @@
+schema: spec-driven
+
+# Project context (optional)
+# This is shown to AI when creating artifacts.
+# Add your tech stack, conventions, style guides, domain knowledge, etc.
+# Example:
+#   context: |
+#     Tech stack: TypeScript, React, Node.js
+#     We use conventional commits
+#     Domain: e-commerce platform
+context: |
+  Project: MapNews, a map-based news browser for mainland China users.
+  Stack: Next.js App Router, React, TypeScript, PostgreSQL/PostGIS, Python batch workers.
+  Data: GDELT Events/Mentions/GKG-derived tables, with raw preservation and cleaned display tables.
+  Product direction: Chinese UI, map-first news browsing, region hotspots, channel filtering, source traceability.
+  Architecture constraints: no Docker, no separate backend API service for the MVP; Next.js server code queries PostgreSQL directly.
+  Change process: product, data, architecture, and interaction changes should use OpenSpec artifacts before implementation.
+
+# Per-artifact rules (optional)
+# Add custom rules for specific artifacts.
+# Example:
+#   rules:
+#     proposal:
+#       - Keep proposals under 500 words
+#       - Always include a "Non-goals" section
+#     tasks:
+#       - Break tasks into chunks of max 2 hours
+rules:
+  proposal:
+    - Include intent, scope, non-goals, risks, and acceptance criteria.
+    - State unclear product decisions explicitly instead of guessing.
+  specs:
+    - Use ADDED, MODIFIED, and REMOVED requirements with concrete scenarios.
+    - Write requirements from the user's visible behavior or operational outcome.
+  design:
+    - Include data model, query/API behavior, frontend interaction, and operational impact when relevant.
+    - Call out migration or backfill requirements for database changes.
+  tasks:
+    - Keep tasks verifiable and mark them complete only after implementation is checked.
+    - Include typecheck, build, tests, and browser verification where applicable.
