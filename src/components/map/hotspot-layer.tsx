@@ -71,7 +71,9 @@ export function HotspotLayer({
             r={trendGlowRadius}
             opacity={trendGlowOpacity}
           />
+          <circle className="hotspot-selection-aura" r={ringRadius + 16} />
           <circle className="hotspot-halo" r={ringRadius + 6} />
+          <circle className="hotspot-selection-ring" r={ringRadius + 9} />
           <circle className="hotspot-core" r={sizePx / 2} />
         </g>
       ))}

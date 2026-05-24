@@ -6,6 +6,8 @@ interface RankingListProps {
   maxHeat: number;
   visibleMarkerCount: number;
   totalHotspotCount: number;
+  selectedRegionKey: string | null;
+  selectedDataDate: string | null;
   onLocate: (item: MapHotspot) => void;
   goldsteinColor: (value: number | null) => string;
   formatGoldstein: (value: number | null) => string;
@@ -17,6 +19,8 @@ export function RankingList({
   maxHeat,
   visibleMarkerCount,
   totalHotspotCount,
+  selectedRegionKey,
+  selectedDataDate,
   onLocate,
   goldsteinColor,
   formatGoldstein,
@@ -31,27 +35,31 @@ export function RankingList({
         </span>
       </div>
       <div className="ranking-list">
-        {items.map((item) => (
-          <button
-            key={item.id}
-            type="button"
-            className="ranking-item"
-            style={{ "--situation-color": goldsteinColor(item.weightedGoldstein) } as CSSProperties}
-            onClick={() => onLocate(item)}
-          >
-            <span>{item.regionName}</span>
-            <strong>
-              <i className="situation-dot" />
-              GDELT {formatGoldstein(item.weightedGoldstein)} · {item.trendLabel}
-            </strong>
-            <small>
-              {item.eventCount} 个事件 · {item.sourceCount} 个来源 · 主主题 {themeLabel(item.channel)}
-            </small>
-            <i className="heat-bar">
-              <b style={{ width: `${Math.max(8, Math.round((item.heatScore / maxHeat) * 100))}%` }} />
-            </i>
-          </button>
-        ))}
+        {items.map((item) => {
+          const selected = item.regionKey === selectedRegionKey && item.dataDate === selectedDataDate;
+          return (
+            <button
+              key={item.id}
+              type="button"
+              className={`ranking-item ${selected ? "selected" : ""}`}
+              style={{ "--situation-color": goldsteinColor(item.weightedGoldstein) } as CSSProperties}
+              aria-current={selected ? "true" : undefined}
+              onClick={() => onLocate(item)}
+            >
+              <span>{item.regionName}</span>
+              <strong>
+                <i className="situation-dot" />
+                GDELT {formatGoldstein(item.weightedGoldstein)} · {item.trendLabel}
+              </strong>
+              <small>
+                {item.eventCount} 个事件 · {item.sourceCount} 个来源 · 主主题 {themeLabel(item.channel)}
+              </small>
+              <i className="heat-bar">
+                <b style={{ width: `${Math.max(8, Math.round((item.heatScore / maxHeat) * 100))}%` }} />
+              </i>
+            </button>
+          );
+        })}
         {items.length === 0 ? <div className="empty-detail">当前筛选下暂无热点排行。</div> : null}
       </div>
     </div>

@@ -219,6 +219,25 @@ export interface RegionTrend {
   points: RegionTrendPoint[];
 }
 
+export interface RegionEvent {
+  id: number;
+  eventDate: string;
+  eventDatetime: string | null;
+  dateAdded: string | null;
+  eventCode: string | null;
+  eventBaseCode: string | null;
+  eventRootCode: string | null;
+  eventLabel: string;
+  channel: string;
+  quadClass: number | null;
+  quadClassLabel: string;
+  actor1Name: string | null;
+  actor2Name: string | null;
+  goldsteinScale: number | null;
+  sourceUrl: string | null;
+  sourceDomain: string | null;
+}
+
 function numberValue(value: unknown) {
   return value === null || value === undefined ? 0 : Number(value);
 }
@@ -246,6 +265,33 @@ function quadClassLabel(quadClass: number | null) {
     default:
       return "混合态势";
   }
+}
+
+function eventCodeLabel(eventCode: string | null, eventRootCode?: string | null, eventBaseCode?: string | null) {
+  const root = (eventRootCode || eventBaseCode || eventCode || "").slice(0, 2);
+  const labels: Record<string, string> = {
+    "01": "公开声明",
+    "02": "呼吁/倡议",
+    "03": "合作意向",
+    "04": "磋商/外交接触",
+    "05": "外交合作",
+    "06": "物质合作",
+    "07": "援助/救助",
+    "08": "让步/妥协",
+    "09": "调查",
+    "10": "要求",
+    "11": "反对",
+    "12": "拒绝",
+    "13": "威胁",
+    "14": "抗议",
+    "15": "军事姿态",
+    "16": "关系削减",
+    "17": "胁迫",
+    "18": "攻击",
+    "19": "战斗",
+    "20": "非常规暴力",
+  };
+  return labels[root] ?? (eventCode ? `事件代码 ${eventCode}` : "未知事件");
 }
 
 function stringArray(value: unknown): string[] {
@@ -868,6 +914,80 @@ export async function canRunHotspotEnrichment(id: number) {
     message: hasCleanData
       ? "该热点可以继续补充来源详情。"
       : "原始和清洗中间数据已清理，无法继续补充来源详情。",
+  };
+}
+
+export async function queryRegionEvents(regionKey: string, date: string, limit = 30) {
+  const pool = getPool();
+  const boundedLimit = Math.min(Math.max(Math.trunc(limit), 1), 50);
+  const result = await pool.query<{
+    global_event_id: number | string;
+    event_date: string;
+    event_datetime: string | null;
+    date_added: string | null;
+    actor1_name: string | null;
+    actor2_name: string | null;
+    event_code: string | null;
+    event_base_code: string | null;
+    event_root_code: string | null;
+    channel: string;
+    quad_class: number | string | null;
+    goldstein_scale: number | string | null;
+    source_url: string | null;
+    source_domain: string | null;
+  }>(
+    `
+      select
+        global_event_id,
+        event_date::text,
+        event_datetime::text,
+        date_added::text,
+        actor1_name,
+        actor2_name,
+        event_code,
+        event_base_code,
+        event_root_code,
+        channel,
+        quad_class,
+        goldstein_scale,
+        source_url,
+        source_domain
+      from gdelt_events_clean
+      where region_key = $1
+        and event_date = $2::date
+      order by coalesce(event_datetime, date_added) desc nulls last, global_event_id desc
+      limit $3
+    `,
+    [regionKey, date, boundedLimit],
+  );
+  const events: RegionEvent[] = result.rows.map((row) => {
+    const quadClass = numberOrNull(row.quad_class);
+    return {
+      id: Number(row.global_event_id),
+      eventDate: row.event_date,
+      eventDatetime: row.event_datetime,
+      dateAdded: row.date_added,
+      eventCode: row.event_code,
+      eventBaseCode: row.event_base_code,
+      eventRootCode: row.event_root_code,
+      eventLabel: eventCodeLabel(row.event_code, row.event_root_code, row.event_base_code),
+      channel: row.channel,
+      quadClass,
+      quadClassLabel: quadClassLabel(quadClass),
+      actor1Name: row.actor1_name,
+      actor2Name: row.actor2_name,
+      goldsteinScale: numberOrNull(row.goldstein_scale),
+      sourceUrl: row.source_url,
+      sourceDomain: row.source_domain,
+    };
+  });
+  return {
+    events,
+    status: {
+      ok: true,
+      message: events.length ? "地区事件时间线已更新" : "该地区当前日期暂无可追溯事件。",
+      emptyReason: events.length ? undefined : "empty",
+    } satisfies QueryStatus,
   };
 }
 

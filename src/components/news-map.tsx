@@ -25,9 +25,16 @@ import {
 import type { HotspotMarkerView } from "@/components/map/hotspot-layer";
 import { useWorkspaceData } from "@/components/hooks/use-workspace-data";
 import { MapRenderer } from "@/components/map/map-renderer";
+import { DetailsDrawer, type DetailTab } from "@/components/panel/details-drawer";
 import { RankingList } from "@/components/panel/ranking-list";
-import { RegionTrendPanel } from "@/components/panel/region-trend-panel";
-import type { DataStatus, DailyBrief, HotspotDetail, MapHotspot, QueryStatus, RegionTrend } from "@/lib/hotspots";
+import type {
+  DataStatus,
+  DailyBrief,
+  HotspotDetail,
+  MapHotspot,
+  QueryStatus,
+  RegionTrend,
+} from "@/lib/hotspots";
 
 interface NewsMapProps {
   dates: string[];
@@ -58,7 +65,6 @@ interface SearchTarget {
 }
 
 type RegionTrendPayload = { trend: RegionTrend };
-type PanelView = "ranking" | "detail";
 type EnrichmentState = {
   hotspotId: number;
   status: "running" | "success" | "error";
@@ -480,6 +486,8 @@ export function NewsMap({
   const mapEl = useRef<HTMLDivElement | null>(null);
   const trendAbortRef = useRef<AbortController | null>(null);
   const enrichmentPollRef = useRef<Map<number, boolean>>(new Map());
+  const channelRequestRef = useRef(0);
+  const selectedFocusRef = useRef<string | null>(null);
   const projectionRef = useRef<GeoProjection | null>(null);
   const mapBoundsRef = useRef<MapBounds | null>(null);
   const sizeRef = useRef<MapSize>({ width: 0, height: 0 });
@@ -495,11 +503,13 @@ export function NewsMap({
   const [dragging, setDragging] = useState(false);
   const [selectedRegion, setSelectedRegion] = useState<MapHotspot | null>(null);
   const [selected, setSelected] = useState<HotspotDetail | null>(null);
+  const [detailTab, setDetailTab] = useState<DetailTab>("region");
+  const [sourceLoading, setSourceLoading] = useState(false);
+  const [sourceMessage, setSourceMessage] = useState<string | null>(null);
   const [regionTrend, setRegionTrend] = useState<RegionTrend | null>(null);
   const [regionTrendMessage, setRegionTrendMessage] = useState<string | null>(null);
   const [hoveredRegionKey, setHoveredRegionKey] = useState<string | null>(null);
   const [expandedStoryId, setExpandedStoryId] = useState<number | null>(null);
-  const [panelView, setPanelView] = useState<PanelView>("ranking");
   const [enrichmentState, setEnrichmentState] = useState<EnrichmentState | null>(null);
   const [searchText, setSearchText] = useState("");
   const [searchMessage, setSearchMessage] = useState<string | null>(null);
@@ -557,11 +567,6 @@ export function NewsMap({
     queryParams,
     briefParams,
   });
-  const selectedRegionKey = selectedRegion ? selectedRegion.regionKey : null;
-  const selectedRegionMaxQuadEvents = Math.max(
-    ...(selectedRegion?.quadClassBreakdown.map((item) => item.eventCount) ?? []),
-    1,
-  );
   const candidateHotspots = useMemo(() => {
     const limit = hotspotCandidateLimitForZoom(mapView.k, hotspots.length);
     const candidates = hotspots.slice(0, limit);
@@ -581,10 +586,17 @@ export function NewsMap({
     };
   }, [hotspots]);
   const maxRankingHeat = Math.max(...ranking.map((item) => item.heatScore), 1);
-  const selectedRegionMaxChannelHeat = Math.max(
-    ...(selectedRegion?.channelBreakdown.map((item) => item.heatScore) ?? []),
-    1,
-  );
+  const selectedRegionRank = useMemo(() => {
+    if (!selectedRegion) return null;
+    const rankingIndex = ranking.findIndex(
+      (item) => item.regionKey === selectedRegion.regionKey && item.dataDate === selectedRegion.dataDate,
+    );
+    if (rankingIndex >= 0) return rankingIndex + 1;
+    const hotspotIndex = hotspots.findIndex(
+      (item) => item.regionKey === selectedRegion.regionKey && item.dataDate === selectedRegion.dataDate,
+    );
+    return hotspotIndex >= 0 ? hotspotIndex + 1 : null;
+  }, [hotspots, ranking, selectedRegion]);
   const selectedEnrichmentState =
     selected && enrichmentState?.hotspotId === selected.id ? enrichmentState : null;
   const searchTargets = useMemo(() => buildSearchTargets(assets), [assets]);
@@ -596,7 +608,8 @@ export function NewsMap({
         const point = screenPoint(projection, mapView, hotspot.lng, hotspot.lat);
         if (!isScreenVisible(point, size, 18)) return null;
         const markerKey = hotspot.regionKey;
-        const selected = markerKey === selectedRegionKey;
+        const selected =
+          hotspot.regionKey === selectedRegion?.regionKey && hotspot.dataDate === selectedRegion.dataDate;
         const hovered = markerKey === hoveredRegionKey;
         const color = goldsteinColor(hotspot.weightedGoldstein);
         const heatIntensity = heatIntensityFor(hotspot.heatScore, hotspotHeatScale.low, hotspotHeatScale.high);
@@ -627,7 +640,7 @@ export function NewsMap({
       })
       .filter((item): item is NonNullable<typeof item> => item !== null);
     return declutterHotspotMarkers(candidateMarkers, mapView.k);
-  }, [candidateHotspots, hotspotHeatScale, hoveredRegionKey, mapView, projection, selectedRegionKey, size]);
+  }, [candidateHotspots, hotspotHeatScale, hoveredRegionKey, mapView, projection, selectedRegion, size]);
 
   const hoveredMarker = useMemo(
     () => hotspotMarkers.find((marker) => marker.markerKey === hoveredRegionKey) ?? null,
@@ -701,6 +714,18 @@ export function NewsMap({
   useEffect(() => {
     projectionRef.current = projection;
   }, [projection]);
+
+  useEffect(() => {
+    if (!selectedRegion) {
+      selectedFocusRef.current = null;
+      return;
+    }
+    if (!projection || size.width <= 0 || size.height <= 0) return;
+    const focusKey = `${selectedRegion.regionKey}:${selectedRegion.dataDate}:${size.width}x${size.height}`;
+    if (selectedFocusRef.current === focusKey) return;
+    selectedFocusRef.current = focusKey;
+    zoomToPoint(selectedRegion.lng, selectedRegion.lat, mapViewRef.current.k);
+  }, [projection, selectedRegion, size.height, size.width]);
 
   useEffect(() => {
     trendAbortRef.current?.abort();
@@ -890,21 +915,49 @@ export function NewsMap({
     setSelected(null);
     setExpandedStoryId(null);
     setEnrichmentState(null);
-    setPanelView("detail");
+    setSourceMessage(null);
+    setDetailTab("region");
+    void loadChannelHotspot(hotspot.primaryHotspotId, { switchToSource: false, triggerEnrichment: true });
   }
 
-  async function openChannelHotspot(id: number) {
-    const hotspot = await fetchHotspotDetail(id);
-    setSelected(hotspot);
-    setExpandedStoryId(hotspot?.storyGroups[0]?.id ?? null);
-    if (hotspot) {
-      setPanelView("detail");
-      if (hotspotNeedsEnrichment(hotspot)) {
+  async function loadChannelHotspot(
+    id: number,
+    options: { switchToSource: boolean; triggerEnrichment: boolean },
+  ) {
+    const requestId = channelRequestRef.current + 1;
+    channelRequestRef.current = requestId;
+    setSourceLoading(true);
+    setSourceMessage(null);
+    try {
+      const hotspot = await fetchHotspotDetail(id);
+      if (requestId !== channelRequestRef.current) return;
+      setSelected(hotspot);
+      setExpandedStoryId(hotspot?.storyGroups[0]?.id ?? null);
+      if (options.switchToSource) setDetailTab("source");
+      if (!hotspot) {
+        setSourceMessage("未找到该主题来源分析。");
+        setEnrichmentState(null);
+        return;
+      }
+      if (options.triggerEnrichment && hotspotNeedsEnrichment(hotspot)) {
         void triggerHotspotEnrichment(id);
       } else {
         setEnrichmentState(null);
       }
+    } catch (error) {
+      if (requestId !== channelRequestRef.current) return;
+      setSelected(null);
+      setExpandedStoryId(null);
+      setSourceMessage(error instanceof Error ? error.message : "来源分析加载失败。");
+      setEnrichmentState(null);
+      if (options.switchToSource) setDetailTab("source");
+    } finally {
+      if (requestId === channelRequestRef.current) setSourceLoading(false);
     }
+  }
+
+  function openChannelHotspot(id: number) {
+    void loadChannelHotspot(id, { switchToSource: true, triggerEnrichment: true });
   }
 
   function locateRankingItem(item: MapHotspot) {
@@ -976,7 +1029,7 @@ export function NewsMap({
       : `${loading ? "正在刷新热点..." : message ?? status.message} · 当前地图显示 ${hotspotMarkers.length}/${hotspots.length} 个热点`;
 
   return (
-    <section className="map-workspace">
+    <section className={`map-workspace ${selectedRegion ? "has-detail-drawer" : ""}`}>
       <aside className="control-panel" aria-label="全球态势热点工作台">
         <div className="sidebar-section">
           <p className="eyebrow">今日态势简报</p>
@@ -1054,324 +1107,18 @@ export function NewsMap({
           </div>
         ) : null}
 
-        <div className="panel-tabs" role="tablist" aria-label="侧栏视图">
-          <button
-            type="button"
-            className={panelView === "ranking" ? "active" : ""}
-            onClick={() => setPanelView("ranking")}
-          >
-            态势排行
-          </button>
-          <button
-            type="button"
-            className={panelView === "detail" ? "active" : ""}
-            disabled={!selectedRegion && !selected}
-            onClick={() => setPanelView("detail")}
-          >
-            态势详情
-          </button>
-        </div>
-
-        {panelView === "ranking" ? (
-          <RankingList
-            items={ranking}
-            maxHeat={maxRankingHeat}
-            visibleMarkerCount={hotspotMarkers.length}
-            totalHotspotCount={hotspots.length}
-            onLocate={locateRankingItem}
-            goldsteinColor={goldsteinColor}
-            formatGoldstein={formatGoldstein}
-            themeLabel={themeLabel}
-          />
-        ) : selectedRegion ? (
-          <article className="detail-panel">
-            <div className="detail-hero region-detail-hero">
-              <p className="eyebrow">地区态势诊断</p>
-              <h2>{selectedRegion.regionName}</h2>
-              <div className="situation-badges">
-                <span style={{ "--situation-color": situationColor(selectedRegion) } as React.CSSProperties}>
-                  <i />
-                  {selectedRegion.quadClassLabel}
-                </span>
-                <span className={trendClassName(selectedRegion.trendLabel)}>{selectedRegion.trendLabel}</span>
-                <span>GDELT 态势倾向 {formatGoldstein(selectedRegion.weightedGoldstein)}</span>
-              </div>
-              <p className="detail-summary">{selectedRegion.summary}</p>
-              <div className="detail-metrics">
-                <span>综合热度 {selectedRegion.heatScore.toFixed(1)}</span>
-                <span>{selectedRegion.eventCount} 个事件</span>
-                <span>{selectedRegion.mentionCount} 次提及</span>
-                <span>{selectedRegion.sourceCount} 个来源</span>
-                <span>较昨日 {formatHeatDelta(selectedRegion.heatDelta)}</span>
-                <span>主主题 {themeLabel(selectedRegion.channel)}</span>
-                <span>{selectedRegion.channelCount} 个主题</span>
-              </div>
-            </div>
-
-            <section className="detail-section">
-              <p className="eyebrow">90天趋势</p>
-              <RegionTrendPanel trend={regionTrend} message={regionTrendMessage} />
-            </section>
-
-            <section className="detail-section situation-section">
-              <p className="eyebrow">态势分布</p>
-              <div className="quad-breakdown-list">
-                {selectedRegion.quadClassBreakdown.length ? (
-                  selectedRegion.quadClassBreakdown.map((item) => {
-                    const color = QUAD_CLASS_COLORS[item.quadClass] ?? "#64748b";
-                    return (
-                      <div
-                        key={item.quadClass}
-                        className="quad-breakdown-item"
-                        style={{ "--situation-color": color } as React.CSSProperties}
-                      >
-                        <span>
-                          <i />
-                          {item.label}
-                        </span>
-                        <strong>{Math.round(item.share * 100)}%</strong>
-                        <em className="heat-bar">
-                          <b style={{ width: `${Math.max(5, Math.round((item.eventCount / selectedRegionMaxQuadEvents) * 100))}%` }} />
-                        </em>
-                      </div>
-                    );
-                  })
-                ) : (
-                  <p className="muted-copy">当前热点缺少四象限分布，需重新处理数据后补齐。</p>
-                )}
-              </div>
-              <p className="muted-copy">
-                GDELT 态势倾向仅表示热点内事件信号偏合作或冲突，不等同于现实世界结论。
-              </p>
-            </section>
-
-            <section className="detail-section">
-              <p className="eyebrow">主要行动者</p>
-              <div className="tag-cloud">
-                {selectedRegion.topActors.length ? (
-                  selectedRegion.topActors.slice(0, 8).map((actor) => (
-                    <span key={actor.name}>{actor.name} · {actor.count}</span>
-                  ))
-                ) : (
-                  <span>暂无可用行动者聚合</span>
-                )}
-              </div>
-            </section>
-
-            <section className="detail-section">
-              <p className="eyebrow">主题构成</p>
-              <div className="channel-breakdown-list">
-                {selectedRegion.channelBreakdown.map((item) => {
-                  const color = CHANNEL_COLORS[item.channel] ?? "#0f8f7f";
-                  return (
-                    <button
-                      key={item.hotspotId}
-                      type="button"
-                      className={`channel-breakdown-item ${selected?.id === item.hotspotId ? "active" : ""}`}
-                      style={{ "--channel-color": color } as React.CSSProperties}
-                      onClick={() => void openChannelHotspot(item.hotspotId)}
-                    >
-                      <span>
-                        <i />
-                        {themeLabel(item.channel)}
-                      </span>
-                      <strong>{item.heatScore.toFixed(1)}</strong>
-                      <small>
-                        {item.eventCount} 个事件 · {item.mentionCount} 次提及 · {item.sourceCount} 个来源
-                      </small>
-                      <em className="heat-bar">
-                        <b style={{ width: `${Math.max(8, Math.round((item.heatScore / selectedRegionMaxChannelHeat) * 100))}%` }} />
-                      </em>
-                    </button>
-                  );
-                })}
-              </div>
-            </section>
-
-            {selected ? (
-              <>
-            <div className="detail-hero channel-detail-hero">
-              <p className="eyebrow">主题来源诊断</p>
-              <h2>{selected.explanation.title}</h2>
-              <div className="situation-badges">
-                <span style={{ "--situation-color": situationColor(selected) } as React.CSSProperties}>
-                  <i />
-                  {selected.quadClassLabel}
-                </span>
-                <span className={trendClassName(selected.trendLabel)}>{selected.trendLabel}</span>
-                <span>GDELT 态势倾向 {formatGoldstein(selected.weightedGoldstein)}</span>
-              </div>
-              <p className="detail-summary">{selected.explanation.whatHappened}</p>
-              <div className="detail-metrics">
-                <span>{selected.sourceCount} 个来源</span>
-                <span>分析 {selected.explanation.sourceQuality.candidateSourceCount} 个候选</span>
-                <span>读取 {selected.explanation.sourceQuality.fetchedSourceCount} 个代表来源</span>
-                <span>去重 {selected.explanation.sourceQuality.storyCount} 个故事</span>
-                <span>{selected.domainCount} 个域名</span>
-              </div>
-            </div>
-            {hotspotNeedsEnrichment(selected) || selectedEnrichmentState ? (
-              <div className={`enrichment-banner ${selectedEnrichmentState?.status ?? "running"}`}>
-                <strong>
-                  {selectedEnrichmentState?.status === "error"
-                    ? "来源增强失败"
-                    : selectedEnrichmentState?.status === "success"
-                      ? "来源增强完成"
-                      : "正在补充来源信息"}
-                </strong>
-                <span>
-                  {selectedEnrichmentState?.message ??
-                    "正在抓取代表来源元数据，并生成故事组、主题和参与方信息。"}
-                </span>
-              </div>
-            ) : null}
-            <dl>
-              <div>
-                <dt>地区</dt>
-                <dd>{selected.regionName}</dd>
-              </div>
-              <div>
-                <dt>主题</dt>
-                <dd>{themeLabel(selected.channel)}</dd>
-              </div>
-              <div>
-                <dt>热度</dt>
-                <dd>{selected.heatScore.toFixed(1)}</dd>
-              </div>
-              <div>
-                <dt>来源</dt>
-                <dd>
-                  {selected.sourceCount} 个来源，{selected.domainCount} 个域名
-                </dd>
-              </div>
-            </dl>
-
-            <section className="detail-section">
-              <p className="eyebrow">为什么热</p>
-              <ul className="compact-list">
-                {selected.explanation.importanceReasons.map((reason) => (
-                  <li key={reason}>{reason}</li>
-                ))}
-              </ul>
-            </section>
-
-            <section className="detail-section">
-              <p className="eyebrow">主题与参与方</p>
-              <div className="tag-cloud">
-                {selected.explanation.topics.slice(0, 8).map((topic) => (
-                  <span key={topic.name}>{topic.name}</span>
-                ))}
-                {selected.explanation.entities.slice(0, 8).map((entity) => (
-                  <span key={`${entity.type ?? "entity"}-${entity.name}`}>{entity.name}</span>
-                ))}
-                {selected.explanation.topics.length === 0 && selected.explanation.entities.length === 0 ? (
-                  <span>暂无主题实体数据</span>
-                ) : null}
-              </div>
-            </section>
-
-            <section className="detail-section">
-              <p className="eyebrow">热点内故事组</p>
-              <div className="story-list">
-                {selected.storyGroups.map((story) => {
-                  const expanded = expandedStoryId === story.id;
-                  return (
-                    <div key={story.id} className="story-card">
-                      <button type="button" className="story-card-toggle" onClick={() => setExpandedStoryId(expanded ? null : story.id)}>
-                        <span className="story-title">{story.title}</span>
-                        <small>
-                          {story.eventCount} 个事件 · {story.sourceCount} 个来源 · {story.sourceDomainCount} 个域名
-                        </small>
-                        <span className="story-summary">{story.summary}</span>
-                        {story.qualityFlags.length ? (
-                          <span className="flag-row">
-                            {story.qualityFlags.map((flag) => (
-                              <em key={flag}>{flagText(flag)}</em>
-                            ))}
-                          </span>
-                        ) : null}
-                      </button>
-                      {expanded ? (
-                        <span className="story-sources">
-                          {story.sources.map((source) => (
-                            <a key={source.url} href={source.url} target="_blank" rel="noreferrer">
-                              {source.title || source.domain || source.url}
-                            </a>
-                          ))}
-                        </span>
-                      ) : null}
-                    </div>
-                  );
-                })}
-                {selected.storyGroups.length === 0 ? (
-                  <div className="empty-detail">
-                    {selectedEnrichmentState?.message ?? "当前仅有结构化事件数据，来源元数据和故事组仍在补充。"}
-                  </div>
-                ) : null}
-              </div>
-            </section>
-
-            <section className="detail-section">
-              <p className="eyebrow">来源质量</p>
-              <dl className="quality-grid">
-                <div>
-                  <dt>候选来源</dt>
-                  <dd>{selected.explanation.sourceQuality.candidateSourceCount}</dd>
-                </div>
-                <div>
-                  <dt>代表来源</dt>
-                  <dd>{selected.explanation.sourceQuality.fetchedSourceCount}</dd>
-                </div>
-                <div>
-                  <dt>去重故事</dt>
-                  <dd>{selected.explanation.sourceQuality.storyCount}</dd>
-                </div>
-                <div>
-                  <dt>同源转载</dt>
-                  <dd>{selected.explanation.sourceQuality.duplicateSourceCount}</dd>
-                </div>
-                <div>
-                  <dt>旧文风险</dt>
-                  <dd>{selected.explanation.sourceQuality.oldSourceCount}</dd>
-                </div>
-                <div>
-                  <dt>主题覆盖</dt>
-                  <dd>{selected.explanation.sourceQuality.gkgCoveredSourceCount}</dd>
-                </div>
-              </dl>
-            </section>
-
-            <section className="detail-section">
-              <p className="eyebrow">不确定性</p>
-              {selected.explanation.uncertaintyWarnings.length ? (
-                <ul className="compact-list">
-                  {selected.explanation.uncertaintyWarnings.map((warning) => (
-                    <li key={warning}>{warning}</li>
-                  ))}
-                </ul>
-              ) : (
-                <p className="muted-copy">当前代表来源未发现明显数据风险。</p>
-              )}
-            </section>
-
-            <section className="detail-section">
-              <p className="eyebrow">代表来源</p>
-              <div className="source-list">
-                {selected.representativeSources.map((source) => (
-                  <a key={source.url} href={source.url} target="_blank" rel="noreferrer">
-                    {source.title || source.domain || source.url}
-                  </a>
-                ))}
-              </div>
-            </section>
-              </>
-            ) : (
-              <div className="empty-detail channel-detail-empty">选择一个主题查看代表来源、故事组和来源质量。</div>
-            )}
-          </article>
-        ) : (
-          <div className="empty-detail">点击地图热点或排行项查看基础详情。</div>
-        )}
+        <RankingList
+          items={ranking}
+          maxHeat={maxRankingHeat}
+          visibleMarkerCount={hotspotMarkers.length}
+          totalHotspotCount={hotspots.length}
+          selectedRegionKey={selectedRegion?.regionKey ?? null}
+          selectedDataDate={selectedRegion?.dataDate ?? null}
+          onLocate={locateRankingItem}
+          goldsteinColor={goldsteinColor}
+          formatGoldstein={formatGoldstein}
+          themeLabel={themeLabel}
+        />
       </aside>
 
       <MapRenderer
@@ -1402,6 +1149,33 @@ export function NewsMap({
         formatHeatDelta={formatHeatDelta}
         quadClassColors={QUAD_CLASS_COLORS}
       />
+
+      {selectedRegion ? (
+        <DetailsDrawer
+          region={selectedRegion}
+          selected={selected}
+          rank={selectedRegionRank}
+          totalHotspots={hotspots.length}
+          activeTab={detailTab}
+          onTabChange={setDetailTab}
+          regionTrend={regionTrend}
+          regionTrendMessage={regionTrendMessage}
+          onOpenChannelHotspot={openChannelHotspot}
+          sourceLoading={sourceLoading}
+          sourceMessage={sourceMessage}
+          enrichmentState={selectedEnrichmentState}
+          expandedStoryId={expandedStoryId}
+          onToggleStory={(id) => setExpandedStoryId((current) => (current === id ? null : id))}
+          hotspotNeedsEnrichment={hotspotNeedsEnrichment}
+          channelColors={CHANNEL_COLORS}
+          quadClassColors={QUAD_CLASS_COLORS}
+          situationColor={situationColor}
+          trendClassName={trendClassName}
+          formatGoldstein={formatGoldstein}
+          themeLabel={themeLabel}
+          flagText={flagText}
+        />
+      ) : null}
     </section>
   );
 }
