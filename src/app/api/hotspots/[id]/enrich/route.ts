@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { NextResponse } from "next/server";
-import { getHotspotDetail } from "@/lib/hotspots";
+import { canRunHotspotEnrichment, getHotspotDetail } from "@/lib/hotspots";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -148,6 +148,14 @@ export async function POST(_request: Request, context: { params: Promise<{ id: s
     hotspot.explanation.sourceQuality.candidateSourceCount > 0
   ) {
     return NextResponse.json({ hotspotId: id, status: "ready", message: "该热点已有增强详情。" });
+  }
+
+  const enrichmentReadiness = await canRunHotspotEnrichment(id);
+  if (!enrichmentReadiness.ok) {
+    return NextResponse.json(
+      { hotspotId: id, status: "unavailable", message: enrichmentReadiness.message },
+      { status: 409 },
+    );
   }
 
   const job = startEnrichmentJob(id);

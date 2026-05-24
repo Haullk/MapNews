@@ -12,6 +12,7 @@ from psycopg import Connection
 from psycopg.types.json import Jsonb
 
 from worker.db import connect, load_environment
+from worker.cleanup import clear_raw_before_import
 from worker.gdelt_common import (
     GDELT_BASE_URL,
     GdeltFile,
@@ -361,6 +362,8 @@ def run_daily_import(day: date, limit_files: int | None = None, keep_raw: bool =
 
     total = LoaderStats()
     with connect() as conn:
+        clear_raw_before_import(conn)
+        conn.commit()
         batch_id = create_batch(conn, day)
         conn.commit()
         try:

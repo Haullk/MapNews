@@ -10,10 +10,18 @@ from psycopg import Connection
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
+from worker.cleanup import cleanup_intermediate_for_day, cleanup_product_retention, read_retention_days
 from worker.channels import channel_for_event_code
 from worker.db import connect, load_environment
 from worker.gdelt_common import domain_from_url, parse_float, parse_int, parse_timestamp, parse_yyyymmdd
-from worker.p2_enrichment import enrich_day
+from worker.p2_enrichment import enrich_day, read_system_bool
+
+QUAD_CLASS_LABELS = {
+    1: "口头合作",
+    2: "实质合作",
+    3: "口头冲突",
+    4: "实质冲突",
+}
 
 
 @dataclass(frozen=True)
@@ -77,13 +85,30 @@ class HotspotAggregate:
     source_domains: set[str] = field(default_factory=set)
     lat_sum: float = 0
     lon_sum: float = 0
+    quad_class_counts: Counter[int] = field(default_factory=Counter)
+    goldstein_weighted_sum: float = 0
+    goldstein_weight: float = 0
+    goldstein_values: list[float] = field(default_factory=list)
+    actor_counts: Counter[str] = field(default_factory=Counter)
+    heat_delta: float | None = None
+    trend_label: str = "暂无对比"
 
     def add_event(self, event: CleanEvent, mentions: list[CleanMention]) -> None:
+        event_weight = max(event.num_mentions, len(mentions), 1)
         self.event_ids.add(event.global_event_id)
         self.mention_count += max(event.num_mentions, len(mentions))
         self.article_count += event.num_articles
         self.lat_sum += event.lat
         self.lon_sum += event.lon
+        if event.quad_class in QUAD_CLASS_LABELS:
+            self.quad_class_counts[event.quad_class] += 1
+        if event.goldstein_scale is not None:
+            self.goldstein_weighted_sum += event.goldstein_scale * event_weight
+            self.goldstein_weight += event_weight
+            self.goldstein_values.append(event.goldstein_scale)
+        for actor_name in (event.actor1_name, event.actor2_name):
+            if actor_name:
+                self.actor_counts[actor_name] += 1
         if event.source_url:
             self.source_urls.add(event.source_url)
         if event.source_domain:
@@ -115,6 +140,48 @@ class HotspotAggregate:
             + len(self.source_domains) * 3
             + self.article_count * 0.8
         )
+
+    @property
+    def dominant_quad_class(self) -> int | None:
+        if not self.quad_class_counts:
+            return None
+        return self.quad_class_counts.most_common(1)[0][0]
+
+    @property
+    def quad_class_breakdown(self) -> list[dict[str, float | int | str]]:
+        total = sum(self.quad_class_counts.values())
+        if total == 0:
+            return []
+        return [
+            {
+                "quadClass": quad_class,
+                "label": QUAD_CLASS_LABELS[quad_class],
+                "eventCount": count,
+                "share": count / total,
+            }
+            for quad_class, count in self.quad_class_counts.most_common()
+        ]
+
+    @property
+    def weighted_goldstein(self) -> float | None:
+        if self.goldstein_weight == 0:
+            return None
+        return self.goldstein_weighted_sum / self.goldstein_weight
+
+    @property
+    def goldstein_min(self) -> float | None:
+        return min(self.goldstein_values) if self.goldstein_values else None
+
+    @property
+    def goldstein_max(self) -> float | None:
+        return max(self.goldstein_values) if self.goldstein_values else None
+
+    @property
+    def top_actors(self) -> list[dict[str, int | str]]:
+        return [
+            {"name": name, "count": count}
+            for name, count in self.actor_counts.most_common(8)
+        ]
 
 
 class BriefCount(TypedDict):
@@ -214,6 +281,219 @@ def aggregate_hotspots(
         )
         hotspot.add_event(event, mentions_by_event.get(event.global_event_id, []))
     return sorted(grouped.values(), key=lambda item: item.heat_score, reverse=True)
+
+
+def classify_trend(current_heat: float, previous_heat: float | None) -> tuple[float | None, str]:
+    if previous_heat is None:
+        return None, "暂无对比"
+    delta = current_heat - previous_heat
+    baseline = max(previous_heat, 1)
+    if delta >= max(10, baseline * 0.15):
+        return delta, "升温"
+    if delta <= -max(10, baseline * 0.15):
+        return delta, "冷却"
+    return delta, "活跃"
+
+
+def apply_hotspot_trends(
+    hotspots: list[HotspotAggregate],
+    previous_heat_by_key: dict[tuple[str, str], float],
+) -> None:
+    for hotspot in hotspots:
+        delta, label = classify_trend(
+            hotspot.heat_score,
+            previous_heat_by_key.get((hotspot.region_key, hotspot.channel)),
+        )
+        hotspot.heat_delta = delta
+        hotspot.trend_label = label
+
+
+def sync_region_daily_metrics(conn: Connection, day: date) -> int:
+    previous_day = day - timedelta(days=1)
+    with conn.cursor() as cur:
+        cur.execute("delete from map_region_daily_metrics where data_date = %s", (day,))
+        cur.execute(
+            """
+            with filtered as (
+              select *
+              from map_hotspots
+              where data_date = %s
+            ),
+            quad_source as (
+              select
+                f.data_date,
+                f.region_key,
+                (item->>'quadClass')::int as quad_class,
+                sum(coalesce((item->>'eventCount')::numeric, 0)) as event_count
+              from filtered f
+              cross join lateral jsonb_array_elements(f.quad_class_breakdown) item
+              where item ? 'quadClass'
+              group by f.data_date, f.region_key, (item->>'quadClass')::int
+            ),
+            quad_totals as (
+              select
+                data_date,
+                region_key,
+                quad_class,
+                event_count,
+                sum(event_count) over (partition by data_date, region_key) as total_event_count
+              from quad_source
+            ),
+            quad_summary as (
+              select
+                data_date,
+                region_key,
+                (array_agg(quad_class order by event_count desc, quad_class desc))[1] as dominant_quad_class,
+                jsonb_agg(
+                  jsonb_build_object(
+                    'quadClass', quad_class,
+                    'label', case quad_class
+                      when 1 then '口头合作'
+                      when 2 then '实质合作'
+                      when 3 then '口头冲突'
+                      when 4 then '实质冲突'
+                      else '混合态势'
+                    end,
+                    'eventCount', event_count,
+                    'share', event_count / nullif(total_event_count, 0)
+                  )
+                  order by event_count desc, quad_class desc
+                ) as quad_class_breakdown
+              from quad_totals
+              group by data_date, region_key
+            ),
+            actor_source as (
+              select
+                f.data_date,
+                f.region_key,
+                actor->>'name' as name,
+                sum(coalesce((actor->>'count')::numeric, (actor->>'eventCount')::numeric, (actor->>'event_count')::numeric, 0)) as count
+              from filtered f
+              cross join lateral jsonb_array_elements(f.top_actors) actor
+              where actor ? 'name' and actor->>'name' <> ''
+              group by f.data_date, f.region_key, actor->>'name'
+            ),
+            actor_ranked as (
+              select
+                data_date,
+                region_key,
+                name,
+                count,
+                row_number() over (partition by data_date, region_key order by count desc, name asc) as rank
+              from actor_source
+            ),
+            actor_summary as (
+              select
+                data_date,
+                region_key,
+                jsonb_agg(jsonb_build_object('name', name, 'count', count) order by count desc, name asc) as top_actors
+              from actor_ranked
+              where rank <= 8
+              group by data_date, region_key
+            ),
+            grouped as (
+              select
+                data_date,
+                region_key,
+                (array_agg(region_name order by heat_score desc, event_count desc, id asc))[1] as region_name,
+                (array_remove(array_agg(country_code order by heat_score desc, event_count desc, id asc), null))[1] as country_code,
+                (array_agg(channel order by heat_score desc, event_count desc, id asc))[1] as primary_channel,
+                sum(centroid_lat * greatest(event_count, 1)) / nullif(sum(greatest(event_count, 1)), 0) as centroid_lat,
+                sum(centroid_long * greatest(event_count, 1)) / nullif(sum(greatest(event_count, 1)), 0) as centroid_long,
+                sum(heat_score) as heat_score,
+                sum(event_count) as event_count,
+                sum(mention_count) as mention_count,
+                sum(article_count) as article_count,
+                sum(source_count) as source_count,
+                sum(source_domain_count) as source_domain_count,
+                sum(weighted_goldstein * greatest(event_count, 1))
+                  / nullif(sum(greatest(event_count, 1)) filter (where weighted_goldstein is not null), 0) as weighted_goldstein,
+                min(goldstein_min) as goldstein_min,
+                max(goldstein_max) as goldstein_max,
+                count(*) as channel_count,
+                jsonb_agg(
+                  jsonb_build_object(
+                    'hotspotId', id,
+                    'channel', channel,
+                    'heatScore', heat_score,
+                    'eventCount', event_count,
+                    'mentionCount', mention_count,
+                    'sourceCount', source_count,
+                    'summary', summary
+                  )
+                  order by heat_score desc, event_count desc, id asc
+                ) as channel_breakdown,
+                max(data_updated_at) as data_updated_at
+              from filtered
+              group by data_date, region_key
+            ),
+            previous_grouped as (
+              select region_key, sum(heat_score) as heat_score
+              from map_hotspots
+              where data_date = %s
+              group by region_key
+            ),
+            final_rows as (
+              select
+                g.*,
+                qs.dominant_quad_class,
+                coalesce(qs.quad_class_breakdown, '[]'::jsonb) as quad_class_breakdown,
+                coalesce(actor_summary.top_actors, '[]'::jsonb) as top_actors,
+                case when p.heat_score is null then null else g.heat_score - p.heat_score end as heat_delta,
+                case
+                  when p.heat_score is null then '暂无对比'
+                  when g.heat_score - p.heat_score >= greatest(10, p.heat_score * 0.15) then '升温'
+                  when g.heat_score - p.heat_score <= -greatest(10, p.heat_score * 0.15) then '冷却'
+                  else '活跃'
+                end as trend_label
+              from grouped g
+              left join quad_summary qs using (data_date, region_key)
+              left join actor_summary using (data_date, region_key)
+              left join previous_grouped p using (region_key)
+            )
+            insert into map_region_daily_metrics (
+              data_date, region_key, region_name, country_code, centroid_lat, centroid_long, geom,
+              primary_channel, channel_count, channel_breakdown, heat_score, heat_delta, trend_label,
+              event_count, mention_count, article_count, source_count, source_domain_count,
+              weighted_goldstein, goldstein_min, goldstein_max, dominant_quad_class,
+              quad_class_breakdown, top_actors, data_updated_at
+            )
+            select
+              data_date, region_key, region_name, country_code, centroid_lat, centroid_long,
+              ST_SetSRID(ST_MakePoint(centroid_long, centroid_lat), 4326),
+              primary_channel, channel_count, channel_breakdown, heat_score, heat_delta, trend_label,
+              event_count, mention_count, article_count, source_count, source_domain_count,
+              weighted_goldstein, goldstein_min, goldstein_max, dominant_quad_class,
+              quad_class_breakdown, top_actors, data_updated_at
+            from final_rows
+            on conflict (data_date, region_key) do update set
+              region_name = excluded.region_name,
+              country_code = excluded.country_code,
+              centroid_lat = excluded.centroid_lat,
+              centroid_long = excluded.centroid_long,
+              geom = excluded.geom,
+              primary_channel = excluded.primary_channel,
+              channel_count = excluded.channel_count,
+              channel_breakdown = excluded.channel_breakdown,
+              heat_score = excluded.heat_score,
+              heat_delta = excluded.heat_delta,
+              trend_label = excluded.trend_label,
+              event_count = excluded.event_count,
+              mention_count = excluded.mention_count,
+              article_count = excluded.article_count,
+              source_count = excluded.source_count,
+              source_domain_count = excluded.source_domain_count,
+              weighted_goldstein = excluded.weighted_goldstein,
+              goldstein_min = excluded.goldstein_min,
+              goldstein_max = excluded.goldstein_max,
+              dominant_quad_class = excluded.dominant_quad_class,
+              quad_class_breakdown = excluded.quad_class_breakdown,
+              top_actors = excluded.top_actors,
+              data_updated_at = excluded.data_updated_at
+            """,
+            (day, previous_day),
+        )
+        return cur.rowcount
 
 
 def hotspot_summary(hotspot: HotspotAggregate) -> str:
@@ -366,6 +646,21 @@ def process_day(conn: Connection, day: date) -> dict[str, int]:
         cur.execute("delete from map_hotspots where data_date = %s", (day,))
 
     hotspots = aggregate_hotspots(events, mentions_by_event)
+    previous_day = day - timedelta(days=1)
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            """
+            select region_key, channel, heat_score
+            from map_hotspots
+            where data_date = %s
+            """,
+            (previous_day,),
+        )
+        previous_heat_by_key = {
+            (row["region_key"], row["channel"]): float(row["heat_score"])
+            for row in cur.fetchall()
+        }
+    apply_hotspot_trends(hotspots, previous_heat_by_key)
     for hotspot in hotspots:
         uid = f"{hotspot.data_date.isoformat()}:{hotspot.region_key}:{hotspot.channel}"
         with conn.cursor() as cur:
@@ -374,11 +669,13 @@ def process_day(conn: Connection, day: date) -> dict[str, int]:
                 insert into map_hotspots (
                   hotspot_uid, data_date, region_key, region_name, country_code, channel,
                   centroid_lat, centroid_long, geom, event_count, mention_count, article_count,
-                  source_count, source_domain_count, heat_score, summary, data_updated_at
+                  source_count, source_domain_count, heat_score, summary, dominant_quad_class,
+                  quad_class_breakdown, weighted_goldstein, goldstein_min, goldstein_max,
+                  heat_delta, trend_label, top_actors, data_updated_at
                 )
                 values (
                   %s, %s, %s, %s, %s, %s, %s, %s, ST_SetSRID(ST_MakePoint(%s, %s), 4326),
-                  %s, %s, %s, %s, %s, %s, %s, %s
+                  %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
                 )
                 returning id
                 """,
@@ -400,6 +697,14 @@ def process_day(conn: Connection, day: date) -> dict[str, int]:
                     len(hotspot.source_domains),
                     hotspot.heat_score,
                     hotspot_summary(hotspot),
+                    hotspot.dominant_quad_class,
+                    Jsonb(hotspot.quad_class_breakdown),
+                    hotspot.weighted_goldstein,
+                    hotspot.goldstein_min,
+                    hotspot.goldstein_max,
+                    hotspot.heat_delta,
+                    hotspot.trend_label,
+                    Jsonb(hotspot.top_actors),
                     end_at,
                 ),
             )
@@ -417,21 +722,30 @@ def process_day(conn: Connection, day: date) -> dict[str, int]:
                     (hotspot_id, url, domain_from_url(url), rank),
                 )
 
+    region_metrics = sync_region_daily_metrics(conn, day)
     write_daily_brief(conn, day, hotspots, end_at)
     p2_stats: dict[str, int] = {"gkg_documents": 0, "hotspots": 0, "sources": 0, "stories": 0}
-    try:
-        p2_stats = enrich_day(conn, day)
-    except Exception as error:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                update gdelt_import_batches
-                set processing_status = 'partial_success',
-                    error_message = coalesce(error_message || E'\n', '') || %s
-                where import_date = %s
-                """,
-                (f"P2 enrichment failed: {error}", day),
-            )
+    p2_failed = False
+    p2_enabled = read_system_bool(conn, "p2_enrichment_enabled", True)
+    if p2_enabled:
+        try:
+            p2_stats = enrich_day(conn, day)
+        except Exception as error:
+            p2_failed = True
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    update gdelt_import_batches
+                    set processing_status = 'partial_success',
+                        error_message = coalesce(error_message || E'\n', '') || %s
+                    where import_date = %s
+                    """,
+                    (f"P2 enrichment failed: {error}", day),
+                )
+    cleanup_stats: dict[str, int | str] = {}
+    if p2_enabled and not p2_failed:
+        cleanup_stats.update(cleanup_intermediate_for_day(conn, day))
+    cleanup_stats.update(cleanup_product_retention(conn, read_retention_days(conn)))
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -447,10 +761,12 @@ def process_day(conn: Connection, day: date) -> dict[str, int]:
     return {
         "events_cleaned": len(events),
         "hotspots": len(hotspots),
+        "region_metrics": region_metrics,
         "p2_gkg_documents": p2_stats["gkg_documents"],
         "p2_hotspots": p2_stats["hotspots"],
         "p2_sources": p2_stats["sources"],
         "p2_stories": p2_stats["stories"],
+        "cleanup_rows": sum(value for value in cleanup_stats.values() if isinstance(value, int)),
     }
 
 
@@ -469,9 +785,9 @@ def write_daily_brief(
     if hotspots:
         region_text = "、".join(item["name"] for item in top_regions[:3])
         channel_text = "、".join(item["name"] for item in top_channels[:3])
-        brief = f"当前数据覆盖 {day.isoformat()}。热点主要集中在{region_text}，{channel_text}类报道较多。"
+        brief = f"当前数据覆盖 {day.isoformat()}。态势热点主要集中在{region_text}，{channel_text}类事件信号较多。"
     else:
-        brief = f"当前数据覆盖 {day.isoformat()}，暂无可展示热点。"
+        brief = f"当前数据覆盖 {day.isoformat()}，暂无可展示态势热点。"
     with conn.cursor() as cur:
         cur.execute(
             """

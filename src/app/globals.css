@@ -258,8 +258,18 @@ button {
 }
 
 .ranking-item strong {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   color: var(--accent-strong);
   font-size: 13px;
+}
+
+.situation-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 999px;
+  background: var(--situation-color, var(--accent));
 }
 
 .ranking-item small {
@@ -328,6 +338,151 @@ button {
   color: var(--accent-strong);
   font-size: 12px;
   font-weight: 700;
+}
+
+.situation-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 12px;
+}
+
+.situation-badges span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 25px;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: #fff;
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.situation-badges span i {
+  width: 9px;
+  height: 9px;
+  border-radius: 999px;
+  background: var(--situation-color, var(--accent));
+}
+
+.situation-badges .warming {
+  color: #a64600;
+  background: #fff4e5;
+}
+
+.situation-badges .cooling {
+  color: #52606d;
+  background: #f1f4f8;
+}
+
+.quad-breakdown-list {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.quad-breakdown-item {
+  --situation-color: var(--accent);
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 5px 10px;
+  align-items: center;
+}
+
+.quad-breakdown-item span {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 750;
+}
+
+.quad-breakdown-item span i {
+  flex: 0 0 auto;
+  width: 9px;
+  height: 9px;
+  border-radius: 999px;
+  background: var(--situation-color);
+}
+
+.quad-breakdown-item strong {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.quad-breakdown-item .heat-bar {
+  grid-column: 1 / -1;
+}
+
+.quad-breakdown-item .heat-bar b {
+  background: var(--situation-color);
+}
+
+.trend-panel {
+  display: grid;
+  gap: 10px;
+}
+
+.trend-panel-heading,
+.trend-chart-title,
+.trend-meta {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.trend-panel-heading span,
+.trend-chart-title span {
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.trend-panel-heading strong,
+.trend-chart-title strong,
+.trend-meta span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.trend-chart {
+  display: grid;
+  gap: 5px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+}
+
+.trend-chart svg {
+  display: block;
+  width: 100%;
+  height: 76px;
+}
+
+.trend-axis {
+  stroke: #d6deea;
+  stroke-width: 1;
+}
+
+.trend-line {
+  fill: none;
+  stroke-width: 2.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.trend-line.heat {
+  stroke: var(--accent);
+}
+
+.trend-line.goldstein {
+  stroke: #475467;
 }
 
 .enrichment-banner {
@@ -670,16 +825,9 @@ button {
 }
 
 .hotspot-dot .hotspot-halo {
-  fill: color-mix(in srgb, var(--marker-color) 22%, transparent);
-  stroke: color-mix(in srgb, var(--marker-color) 28%, transparent);
-  stroke-width: 1;
-}
-
-.hotspot-dot .hotspot-channel-ring {
-  fill: none;
-  stroke-linecap: butt;
-  stroke-width: 4.5;
-  pointer-events: none;
+  fill: color-mix(in srgb, var(--marker-color) 24%, transparent);
+  stroke: color-mix(in srgb, var(--marker-color) 42%, transparent);
+  stroke-width: 1.2;
 }
 
 .hotspot-dot .hotspot-core {
@@ -703,12 +851,158 @@ button {
   filter: drop-shadow(0 4px 10px rgba(29, 36, 51, 0.2));
 }
 
-.hotspot-dot.selected .hotspot-channel-ring {
-  stroke-width: 5.5;
-}
-
 .hotspot-dot.selected .hotspot-core {
   stroke-width: 3;
+}
+
+.hotspot-dot.warming .hotspot-heat-glow {
+  animation: hotspotPulse 1.9s ease-in-out infinite;
+}
+
+.hotspot-dot.cooling {
+  opacity: 0.72;
+}
+
+.hotspot-dot.hovered .hotspot-core,
+.hotspot-dot.selected .hotspot-core {
+  filter: drop-shadow(0 7px 14px rgba(29, 36, 51, 0.24));
+}
+
+@keyframes hotspotPulse {
+  0%,
+  100% {
+    opacity: 0.16;
+  }
+  50% {
+    opacity: 0.38;
+  }
+}
+
+.hotspot-hover-card {
+  position: absolute;
+  z-index: 5;
+  display: grid;
+  gap: 7px;
+  width: 286px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--situation-color) 40%, var(--line));
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.97);
+  color: var(--ink);
+  box-shadow: 0 16px 34px rgba(29, 36, 51, 0.16);
+  pointer-events: none;
+}
+
+.hotspot-hover-card strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+.hotspot-hover-card span {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.hotspot-hover-card span i {
+  width: 9px;
+  height: 9px;
+  border-radius: 999px;
+  background: var(--situation-color);
+}
+
+.hotspot-hover-card small {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.hover-quad-list {
+  display: grid;
+  gap: 5px;
+  padding: 2px 0;
+}
+
+.hover-quad-row {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  padding-bottom: 5px;
+  color: var(--ink);
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.hover-quad-row em {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-style: normal;
+}
+
+.hover-quad-row b {
+  font-size: 11px;
+}
+
+.hover-quad-row i {
+  position: absolute;
+  left: 0;
+  right: auto;
+  bottom: 0;
+  height: 3px;
+  border-radius: 999px;
+  background: var(--situation-color);
+}
+
+.goldstein-legend {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  z-index: 3;
+  display: grid;
+  gap: 6px;
+  width: 238px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.94);
+  color: var(--ink);
+  box-shadow: 0 12px 28px rgba(29, 36, 51, 0.1);
+}
+
+.goldstein-legend span {
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.goldstein-legend > i {
+  display: block;
+  height: 9px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #dc2626 0%, #f8fafc 50%, #2563eb 100%);
+  box-shadow: inset 0 0 0 1px rgba(15, 23, 42, 0.08);
+}
+
+.goldstein-legend div {
+  display: flex;
+  justify-content: space-between;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 750;
+}
+
+.goldstein-legend small {
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.35;
 }
 
 .map-overlay {

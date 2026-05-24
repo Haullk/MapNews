@@ -69,13 +69,19 @@ def rows_from_zip(zip_path: Path) -> Iterator[list[str]]:
 def parse_int(value: str | None) -> int | None:
     if value in (None, ""):
         return None
-    return int(str(value))
+    try:
+        return int(str(value))
+    except ValueError:
+        return None
 
 
 def parse_float(value: str | None) -> float | None:
     if value in (None, ""):
         return None
-    return float(str(value))
+    try:
+        return float(str(value))
+    except ValueError:
+        return None
 
 
 def parse_yyyymmdd(value: str | None) -> date | None:

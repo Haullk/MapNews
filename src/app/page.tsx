@@ -8,8 +8,8 @@ export default async function Home() {
     <main className="app-shell">
       <section className="toolbar" aria-label="地图筛选">
         <div className="brand-block">
-          <p className="eyebrow">全球热点</p>
-          <h1>MapNews 地图新闻</h1>
+          <p className="eyebrow">全球态势热点</p>
+          <h1>MapNews 全球态势地图</h1>
         </div>
 
         <div className="status-strip">

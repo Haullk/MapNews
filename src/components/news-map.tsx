@@ -12,7 +12,7 @@ import {
 import { geoBounds, geoCentroid, geoMercator, geoPath } from "d3-geo";
 import type { GeoPermissibleObjects, GeoProjection } from "d3-geo";
 import type { Feature, FeatureCollection, Geometry, Point } from "geojson";
-import type { DataStatus, DailyBrief, HotspotDetail, MapHotspot } from "@/lib/hotspots";
+import type { DataStatus, DailyBrief, HotspotDetail, MapHotspot, RegionTrend } from "@/lib/hotspots";
 
 interface NewsMapProps {
   dates: string[];
@@ -85,6 +85,7 @@ interface SearchTarget {
 }
 
 type HotspotsPayload = { hotspots: MapHotspot[]; status: { message: string; ok: boolean } };
+type RegionTrendPayload = { trend: RegionTrend };
 type LoadMode = "full" | "hotspots" | "viewport";
 type PanelView = "ranking" | "detail";
 type EnrichmentState = {
@@ -92,25 +93,22 @@ type EnrichmentState = {
   status: "running" | "success" | "error";
   message: string;
 };
-type HotspotChannelSegment = {
-  channel: string;
-  color: string;
-  path: string;
-  share: number;
-};
 type HotspotMarker = {
+  markerKey: string;
   hotspot: MapHotspot;
   x: number;
   y: number;
   color: string;
   sizePx: number;
-  label: string;
   ringRadius: number;
-  segments: HotspotChannelSegment[];
-  channelSummary: string;
+  themeSummary: string;
+  goldsteinText: string;
   heatIntensity: number;
+  trendGlowRadius: number;
+  trendGlowOpacity: number;
   collisionRadius: number;
   selected: boolean;
+  hovered: boolean;
 };
 
 const MAP_VIEW_MIN_ZOOM = 1;
@@ -129,6 +127,27 @@ const CHANNEL_COLORS: Record<string, string> = {
   灾害: "#7d4aa8",
   社会: "#52606d",
 };
+
+const QUAD_CLASS_COLORS: Record<number, string> = {
+  1: "#42a5f5",
+  2: "#43a047",
+  3: "#fb8c00",
+  4: "#e53935",
+};
+
+const THEME_LABELS: Record<string, string> = {
+  国际: "国际关系",
+  冲突: "冲突安全",
+  政治: "政治治理",
+  经济: "经济产业",
+  灾害: "灾害事故",
+  社会: "社会民生",
+};
+
+const GOLDSTEIN_NEGATIVE = "#dc2626";
+const GOLDSTEIN_NEUTRAL = "#f8fafc";
+const GOLDSTEIN_POSITIVE = "#2563eb";
+const GOLDSTEIN_MISSING = "#94a3b8";
 
 const COUNTRY_ALIASES: Record<string, string[]> = {
   CHN: ["中国", "中华人民共和国", "China"],
@@ -201,6 +220,163 @@ function heatIntensityFor(heatScore: number, lowHeat: number, highHeat: number) 
   return clamp((Math.log(heatScore + 1) - Math.log(low + 1)) / (Math.log(high + 1) - Math.log(low + 1)), 0, 1);
 }
 
+function themeLabel(channel: string) {
+  return THEME_LABELS[channel] ?? channel;
+}
+
+function situationColor(hotspot: MapHotspot) {
+  return hotspot.dominantQuadClass ? (QUAD_CLASS_COLORS[hotspot.dominantQuadClass] ?? "#64748b") : "#64748b";
+}
+
+function hexToRgb(color: string) {
+  const normalized = color.replace("#", "");
+  return {
+    r: Number.parseInt(normalized.slice(0, 2), 16),
+    g: Number.parseInt(normalized.slice(2, 4), 16),
+    b: Number.parseInt(normalized.slice(4, 6), 16),
+  };
+}
+
+function mixHexColor(fromColor: string, toColor: string, ratio: number) {
+  const from = hexToRgb(fromColor);
+  const to = hexToRgb(toColor);
+  const amount = clamp(ratio, 0, 1);
+  const channel = (fromValue: number, toValue: number) => Math.round(fromValue + (toValue - fromValue) * amount);
+  return `rgb(${channel(from.r, to.r)}, ${channel(from.g, to.g)}, ${channel(from.b, to.b)})`;
+}
+
+function goldsteinColor(value: number | null) {
+  if (value === null) return GOLDSTEIN_MISSING;
+  const normalized = clamp(value, -10, 10);
+  if (normalized < 0) return mixHexColor(GOLDSTEIN_NEGATIVE, GOLDSTEIN_NEUTRAL, (normalized + 10) / 10);
+  return mixHexColor(GOLDSTEIN_NEUTRAL, GOLDSTEIN_POSITIVE, normalized / 10);
+}
+
+function goldsteinToneLabel(value: number | null) {
+  if (value === null) return "暂无倾向";
+  if (value <= -4) return "冲突倾向强";
+  if (value < -1) return "冲突倾向";
+  if (value <= 1) return "中性/混合";
+  if (value < 4) return "合作倾向";
+  return "合作倾向强";
+}
+
+function trendClassName(trendLabel: string) {
+  if (trendLabel === "升温") return "warming";
+  if (trendLabel === "冷却") return "cooling";
+  return "active";
+}
+
+function trendGlowFor(trendLabel: string, ringRadius: number) {
+  if (trendLabel === "升温") return { radius: ringRadius + 24, opacity: 0.34 };
+  if (trendLabel === "活跃") return { radius: ringRadius + 14, opacity: 0.16 };
+  if (trendLabel === "冷却") return { radius: ringRadius + 10, opacity: 0.08 };
+  return { radius: ringRadius + 8, opacity: 0 };
+}
+
+function formatHeatDelta(value: number | null) {
+  if (value === null) return "暂无对比";
+  const sign = value > 0 ? "+" : "";
+  return `${sign}${value.toFixed(1)}`;
+}
+
+function formatGoldstein(value: number | null) {
+  if (value === null) return "暂无";
+  return `${value > 0 ? "+" : ""}${value.toFixed(1)}`;
+}
+
+function trendLinePath(
+  points: RegionTrend["points"],
+  valueForPoint: (point: RegionTrend["points"][number]) => number | null,
+  minValue: number,
+  maxValue: number,
+) {
+  if (points.length === 0) return "";
+  const left = 8;
+  const right = 292;
+  const top = 10;
+  const bottom = 66;
+  const width = right - left;
+  const height = bottom - top;
+  const span = Math.max(1, maxValue - minValue);
+  let drawing = false;
+  const commands: string[] = [];
+  points.forEach((point, index) => {
+    const value = valueForPoint(point);
+    if (value === null || !Number.isFinite(value)) {
+      drawing = false;
+      return;
+    }
+    const x = left + (points.length === 1 ? width / 2 : (index / (points.length - 1)) * width);
+    const y = bottom - clamp((value - minValue) / span, 0, 1) * height;
+    commands.push(`${drawing ? "L" : "M"} ${x.toFixed(1)} ${y.toFixed(1)}`);
+    drawing = true;
+  });
+  return commands.join(" ");
+}
+
+function RegionTrendPanel({ trend, message }: { trend: RegionTrend | null; message: string | null }) {
+  if (message && !trend) {
+    return <div className="empty-detail">{message}</div>;
+  }
+  if (!trend || trend.points.length === 0) {
+    return <div className="empty-detail">暂无可用趋势数据。</div>;
+  }
+
+  const availablePoints = trend.points.filter((point) => !point.isMissing);
+  const maxHeat = Math.max(...trend.points.map((point) => point.heatScore), 1);
+  const heatPath = trendLinePath(trend.points, (point) => point.heatScore, 0, maxHeat);
+  const goldsteinPath = trendLinePath(trend.points, (point) => point.weightedGoldstein, -10, 10);
+  const latestPoint = [...trend.points].reverse().find((point) => !point.isMissing);
+
+  return (
+    <div className="trend-panel">
+      <div className="trend-panel-heading">
+        <span>近 {trend.days} 天</span>
+        <strong>{availablePoints.length}/{trend.points.length} 天有数据</strong>
+      </div>
+      <div className="trend-chart">
+        <div className="trend-chart-title">
+          <span>热度趋势</span>
+          <strong>{latestPoint ? latestPoint.heatScore.toFixed(1) : "暂无"}</strong>
+        </div>
+        <svg viewBox="0 0 300 76" role="img" aria-label={`${trend.regionName} 热度趋势`}>
+          <line className="trend-axis" x1="8" y1="66" x2="292" y2="66" />
+          <path className="trend-line heat" d={heatPath} />
+        </svg>
+      </div>
+      <div className="trend-chart">
+        <div className="trend-chart-title">
+          <span>态势趋势</span>
+          <strong>{latestPoint ? formatGoldstein(latestPoint.weightedGoldstein) : "暂无"}</strong>
+        </div>
+        <svg viewBox="0 0 300 76" role="img" aria-label={`${trend.regionName} GDELT 态势趋势`}>
+          <line className="trend-axis" x1="8" y1="38" x2="292" y2="38" />
+          <path className="trend-line goldstein" d={goldsteinPath} />
+          {trend.points.map((point, index) => {
+            if (point.weightedGoldstein === null) return null;
+            const x = 8 + (trend.points.length === 1 ? 142 : (index / (trend.points.length - 1)) * 284);
+            const y = 66 - clamp((point.weightedGoldstein + 10) / 20, 0, 1) * 56;
+            return (
+              <circle
+                key={point.dataDate}
+                cx={x}
+                cy={y}
+                r={2.4}
+                fill={goldsteinColor(point.weightedGoldstein)}
+              />
+            );
+          })}
+        </svg>
+      </div>
+      <div className="trend-meta">
+        <span>{trend.startDate ?? "暂无"} 至 {trend.endDate ?? "暂无"}</span>
+        <span>缺失日期按 0 热度展示</span>
+      </div>
+    </div>
+  );
+}
+
 function hotspotLimitForZoom(zoom: number) {
   if (zoom <= 1.4) return 90;
   if (zoom <= 2.2) return 160;
@@ -221,58 +397,6 @@ function hotspotSpacingForZoom(zoom: number) {
   if (zoom <= 4) return 6;
   if (zoom <= 8) return 4;
   return 2;
-}
-
-function pointOnCircle(radius: number, angle: number) {
-  return {
-    x: Math.cos(angle) * radius,
-    y: Math.sin(angle) * radius,
-  };
-}
-
-function arcPath(radius: number, startAngle: number, endAngle: number) {
-  const start = pointOnCircle(radius, startAngle);
-  const end = pointOnCircle(radius, endAngle);
-  const largeArcFlag = endAngle - startAngle > Math.PI ? 1 : 0;
-  return `M ${start.x.toFixed(3)} ${start.y.toFixed(3)} A ${radius} ${radius} 0 ${largeArcFlag} 1 ${end.x.toFixed(3)} ${end.y.toFixed(3)}`;
-}
-
-function channelSegments(
-  breakdown: MapHotspot["channelBreakdown"],
-  totalHeatScore: number,
-  ringRadius: number,
-): HotspotChannelSegment[] {
-  const orderedChannels = [...breakdown].sort((a, b) => b.heatScore - a.heatScore);
-  const positiveHeatTotal = orderedChannels.reduce((sum, item) => sum + Math.max(0, item.heatScore), 0);
-  const totalHeat = positiveHeatTotal || Math.max(0, totalHeatScore);
-  if (orderedChannels.length === 0 || totalHeat <= 0) return [];
-  if (orderedChannels.length === 1) {
-    const channel = orderedChannels[0];
-    return [
-      {
-        channel: channel.channel,
-        color: CHANNEL_COLORS[channel.channel] ?? "#0f8f7f",
-        path: "",
-        share: 1,
-      },
-    ];
-  }
-
-  const gapAngle = 0.04;
-  const availableAngle = Math.PI * 2 - gapAngle * orderedChannels.length;
-  let startAngle = -Math.PI / 2;
-  return orderedChannels.map((channel) => {
-    const share = Math.max(0, channel.heatScore) / totalHeat;
-    const endAngle = startAngle + availableAngle * share;
-    const segment = {
-      channel: channel.channel,
-      color: CHANNEL_COLORS[channel.channel] ?? "#0f8f7f",
-      path: arcPath(ringRadius, startAngle, endAngle),
-      share,
-    };
-    startAngle = endAngle + gapAngle;
-    return segment;
-  });
 }
 
 function declutterHotspotMarkers(markers: HotspotMarker[], zoom: number) {
@@ -545,6 +669,7 @@ function findSearchTarget(query: string, targets: SearchTarget[]) {
 export function NewsMap({ dates, channels, databaseReady, initialStatus }: NewsMapProps) {
   const mapEl = useRef<HTMLDivElement | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const trendAbortRef = useRef<AbortController | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const requestIdRef = useRef(0);
   const preserveRankingUntilRef = useRef(0);
@@ -573,6 +698,9 @@ export function NewsMap({ dates, channels, databaseReady, initialStatus }: NewsM
   const [brief, setBrief] = useState<DailyBrief | null>(null);
   const [selectedRegion, setSelectedRegion] = useState<MapHotspot | null>(null);
   const [selected, setSelected] = useState<HotspotDetail | null>(null);
+  const [regionTrend, setRegionTrend] = useState<RegionTrend | null>(null);
+  const [regionTrendMessage, setRegionTrendMessage] = useState<string | null>(null);
+  const [hoveredRegionKey, setHoveredRegionKey] = useState<string | null>(null);
   const [expandedStoryId, setExpandedStoryId] = useState<number | null>(null);
   const [panelView, setPanelView] = useState<PanelView>("ranking");
   const [enrichmentState, setEnrichmentState] = useState<EnrichmentState | null>(null);
@@ -602,6 +730,10 @@ export function NewsMap({ dates, channels, databaseReady, initialStatus }: NewsM
   }, [assets, path]);
   const mapReady = Boolean(assets && projection && size.width > 0 && size.height > 0);
   const selectedRegionKey = selectedRegion ? `${selectedRegion.dataDate}-${selectedRegion.regionKey}` : null;
+  const selectedRegionMaxQuadEvents = Math.max(
+    ...(selectedRegion?.quadClassBreakdown.map((item) => item.eventCount) ?? []),
+    1,
+  );
   const candidateHotspots = useMemo(() => {
     const limit = hotspotCandidateLimitForZoom(mapView.k, hotspots.length);
     const candidates = hotspots.slice(0, limit);
@@ -742,35 +874,44 @@ export function NewsMap({ dates, channels, databaseReady, initialStatus }: NewsM
       .map((hotspot) => {
         const point = screenPoint(projection, mapView, hotspot.lng, hotspot.lat);
         if (!isScreenVisible(point, size, 18)) return null;
-        const color = CHANNEL_COLORS[hotspot.channel] ?? "#0f8f7f";
+        const markerKey = `${hotspot.dataDate}-${hotspot.regionKey}`;
+        const selected = markerKey === selectedRegionKey;
+        const hovered = markerKey === hoveredRegionKey;
+        const color = goldsteinColor(hotspot.weightedGoldstein);
         const heatIntensity = heatIntensityFor(hotspot.heatScore, hotspotHeatScale.low, hotspotHeatScale.high);
         const sizePx = markerSizeForHeat(hotspot.heatScore, hotspotHeatScale.low, hotspotHeatScale.high);
         const ringRadius = sizePx / 2 + 5;
-        const segments = channelSegments(hotspot.channelBreakdown, hotspot.heatScore, ringRadius);
-        const label = hotspot.channel.slice(0, 1);
-        const channelSummary = hotspot.channelBreakdown
+        const trendGlow = trendGlowFor(hotspot.trendLabel, ringRadius);
+        const themeSummary = hotspot.channelBreakdown
           .slice(0, 4)
-          .map((item) => `${item.channel}${Math.round((item.heatScore / Math.max(hotspot.heatScore, 1)) * 100)}%`)
+          .map((item) => `${themeLabel(item.channel)}${Math.round((item.heatScore / Math.max(hotspot.heatScore, 1)) * 100)}%`)
           .join("、");
-        const markerKey = `${hotspot.dataDate}-${hotspot.regionKey}`;
         return {
+          markerKey,
           hotspot,
           x: point![0],
           y: point![1],
           color,
           sizePx,
-          label,
           ringRadius,
-          segments,
-          channelSummary,
+          themeSummary,
+          goldsteinText: `${formatGoldstein(hotspot.weightedGoldstein)}，${goldsteinToneLabel(hotspot.weightedGoldstein)}`,
           heatIntensity,
+          trendGlowRadius: trendGlow.radius,
+          trendGlowOpacity: trendGlow.opacity,
           collisionRadius: sizePx / 2 + 6 + heatIntensity * 2,
-          selected: markerKey === selectedRegionKey,
+          selected,
+          hovered,
         };
       })
       .filter((item): item is NonNullable<typeof item> => item !== null);
     return declutterHotspotMarkers(candidateMarkers, mapView.k);
-  }, [candidateHotspots, hotspotHeatScale, mapView, projection, selectedRegionKey, size]);
+  }, [candidateHotspots, hotspotHeatScale, hoveredRegionKey, mapView, projection, selectedRegionKey, size]);
+
+  const hoveredMarker = useMemo(
+    () => hotspotMarkers.find((marker) => marker.markerKey === hoveredRegionKey) ?? null,
+    [hotspotMarkers, hoveredRegionKey],
+  );
 
   const setMapView = useCallback(
     (next: MapView) => {
@@ -976,6 +1117,42 @@ export function NewsMap({ dates, channels, databaseReady, initialStatus }: NewsM
       }
     };
   }, [databaseReady, filters, loadWorkspace]);
+
+  useEffect(() => {
+    trendAbortRef.current?.abort();
+    if (!selectedRegion) {
+      setRegionTrend(null);
+      setRegionTrendMessage(null);
+      return;
+    }
+
+    const controller = new AbortController();
+    trendAbortRef.current = controller;
+    setRegionTrendMessage("正在加载近90天趋势。");
+    const params = new URLSearchParams({
+      regionKey: selectedRegion.regionKey,
+      date: selectedRegion.dataDate,
+      days: "90",
+    });
+    void fetch(`/api/region-trends?${params.toString()}`, {
+      cache: "no-store",
+      signal: controller.signal,
+    })
+      .then(async (response) => {
+        const payload = (await response.json()) as Partial<RegionTrendPayload> & { error?: string };
+        if (!response.ok || !payload.trend) {
+          throw new Error(payload.error ?? "趋势数据加载失败。");
+        }
+        setRegionTrend(payload.trend);
+        setRegionTrendMessage(null);
+      })
+      .catch((error) => {
+        if (error instanceof DOMException && error.name === "AbortError") return;
+        setRegionTrend(null);
+        setRegionTrendMessage(error instanceof Error ? error.message : "趋势数据加载失败。");
+      });
+    return () => controller.abort();
+  }, [selectedRegion]);
 
   function zoomToPoint(lng: number, lat: number, zoom: number) {
     const point = projection?.([lng, lat]);
@@ -1200,10 +1377,10 @@ export function NewsMap({ dates, channels, databaseReady, initialStatus }: NewsM
 
   return (
     <section className="map-workspace">
-      <aside className="control-panel" aria-label="地图新闻工作台">
+      <aside className="control-panel" aria-label="全球态势热点工作台">
         <div className="sidebar-section">
-          <p className="eyebrow">今日地图简报</p>
-          <p className="brief-text">{brief?.briefText ?? "正在读取今日地图简报。"}</p>
+          <p className="eyebrow">今日态势简报</p>
+          <p className="brief-text">{brief?.briefText ?? "正在读取今日态势简报。"}</p>
           <div className="status-note">{brief?.completenessText ?? status.message}</div>
         </div>
 
@@ -1220,15 +1397,15 @@ export function NewsMap({ dates, channels, databaseReady, initialStatus }: NewsM
             </select>
           </label>
           <label>
-            频道
+            主题
             <select
               value={filters.channel}
               onChange={(event) => setFilters((prev) => ({ ...prev, channel: event.target.value }))}
             >
-              <option value="">全部频道</option>
+              <option value="">全部主题</option>
               {channels.map((channel) => (
                 <option key={channel} value={channel}>
-                  {channel}
+                  {themeLabel(channel)}
                 </option>
               ))}
             </select>
@@ -1276,7 +1453,7 @@ export function NewsMap({ dates, channels, databaseReady, initialStatus }: NewsM
             className={panelView === "ranking" ? "active" : ""}
             onClick={() => setPanelView("ranking")}
           >
-            热点排行
+            态势排行
           </button>
           <button
             type="button"
@@ -1284,25 +1461,34 @@ export function NewsMap({ dates, channels, databaseReady, initialStatus }: NewsM
             disabled={!selectedRegion && !selected}
             onClick={() => setPanelView("detail")}
           >
-            热点详情
+            态势详情
           </button>
         </div>
 
         {panelView === "ranking" ? (
           <div className="sidebar-section">
             <div className="section-heading">
-              <p className="eyebrow">热点排行</p>
+              <p className="eyebrow">态势排行</p>
               <span>
                 地图显示 {hotspotMarkers.length}/{hotspots.length}
               </span>
             </div>
             <div className="ranking-list">
               {ranking.map((item) => (
-                <button key={item.id} type="button" className="ranking-item" onClick={() => locateRankingItem(item)}>
+                <button
+                  key={item.id}
+                  type="button"
+                  className="ranking-item"
+                  style={{ "--situation-color": goldsteinColor(item.weightedGoldstein) } as React.CSSProperties}
+                  onClick={() => locateRankingItem(item)}
+                >
                   <span>{item.regionName}</span>
-                  <strong>{item.channelCount > 1 ? `${item.channel}主导 · ${item.channelCount}频道` : item.channel}</strong>
+                  <strong>
+                    <i className="situation-dot" />
+                    GDELT {formatGoldstein(item.weightedGoldstein)} · {item.trendLabel}
+                  </strong>
                   <small>
-                    {item.eventCount} 个事件 · {item.sourceCount} 个来源
+                    {item.eventCount} 个事件 · {item.sourceCount} 个来源 · 主主题 {themeLabel(item.channel)}
                   </small>
                   <i className="heat-bar">
                     <b style={{ width: `${Math.max(8, Math.round((item.heatScore / maxRankingHeat) * 100))}%` }} />
@@ -1315,21 +1501,80 @@ export function NewsMap({ dates, channels, databaseReady, initialStatus }: NewsM
         ) : selectedRegion ? (
           <article className="detail-panel">
             <div className="detail-hero region-detail-hero">
-              <p className="eyebrow">地区综合热点</p>
+              <p className="eyebrow">地区态势诊断</p>
               <h2>{selectedRegion.regionName}</h2>
+              <div className="situation-badges">
+                <span style={{ "--situation-color": situationColor(selectedRegion) } as React.CSSProperties}>
+                  <i />
+                  {selectedRegion.quadClassLabel}
+                </span>
+                <span className={trendClassName(selectedRegion.trendLabel)}>{selectedRegion.trendLabel}</span>
+                <span>GDELT 态势倾向 {formatGoldstein(selectedRegion.weightedGoldstein)}</span>
+              </div>
               <p className="detail-summary">{selectedRegion.summary}</p>
               <div className="detail-metrics">
                 <span>综合热度 {selectedRegion.heatScore.toFixed(1)}</span>
                 <span>{selectedRegion.eventCount} 个事件</span>
                 <span>{selectedRegion.mentionCount} 次提及</span>
                 <span>{selectedRegion.sourceCount} 个来源</span>
-                <span>主频道 {selectedRegion.channel}</span>
-                <span>{selectedRegion.channelCount} 个频道</span>
+                <span>较昨日 {formatHeatDelta(selectedRegion.heatDelta)}</span>
+                <span>主主题 {themeLabel(selectedRegion.channel)}</span>
+                <span>{selectedRegion.channelCount} 个主题</span>
               </div>
             </div>
 
             <section className="detail-section">
-              <p className="eyebrow">频道构成</p>
+              <p className="eyebrow">90天趋势</p>
+              <RegionTrendPanel trend={regionTrend} message={regionTrendMessage} />
+            </section>
+
+            <section className="detail-section situation-section">
+              <p className="eyebrow">态势分布</p>
+              <div className="quad-breakdown-list">
+                {selectedRegion.quadClassBreakdown.length ? (
+                  selectedRegion.quadClassBreakdown.map((item) => {
+                    const color = QUAD_CLASS_COLORS[item.quadClass] ?? "#64748b";
+                    return (
+                      <div
+                        key={item.quadClass}
+                        className="quad-breakdown-item"
+                        style={{ "--situation-color": color } as React.CSSProperties}
+                      >
+                        <span>
+                          <i />
+                          {item.label}
+                        </span>
+                        <strong>{Math.round(item.share * 100)}%</strong>
+                        <em className="heat-bar">
+                          <b style={{ width: `${Math.max(5, Math.round((item.eventCount / selectedRegionMaxQuadEvents) * 100))}%` }} />
+                        </em>
+                      </div>
+                    );
+                  })
+                ) : (
+                  <p className="muted-copy">当前热点缺少四象限分布，需重新处理数据后补齐。</p>
+                )}
+              </div>
+              <p className="muted-copy">
+                GDELT 态势倾向仅表示热点内事件信号偏合作或冲突，不等同于现实世界结论。
+              </p>
+            </section>
+
+            <section className="detail-section">
+              <p className="eyebrow">主要行动者</p>
+              <div className="tag-cloud">
+                {selectedRegion.topActors.length ? (
+                  selectedRegion.topActors.slice(0, 8).map((actor) => (
+                    <span key={actor.name}>{actor.name} · {actor.count}</span>
+                  ))
+                ) : (
+                  <span>暂无可用行动者聚合</span>
+                )}
+              </div>
+            </section>
+
+            <section className="detail-section">
+              <p className="eyebrow">主题构成</p>
               <div className="channel-breakdown-list">
                 {selectedRegion.channelBreakdown.map((item) => {
                   const color = CHANNEL_COLORS[item.channel] ?? "#0f8f7f";
@@ -1343,7 +1588,7 @@ export function NewsMap({ dates, channels, databaseReady, initialStatus }: NewsM
                     >
                       <span>
                         <i />
-                        {item.channel}
+                        {themeLabel(item.channel)}
                       </span>
                       <strong>{item.heatScore.toFixed(1)}</strong>
                       <small>
@@ -1361,8 +1606,16 @@ export function NewsMap({ dates, channels, databaseReady, initialStatus }: NewsM
             {selected ? (
               <>
             <div className="detail-hero channel-detail-hero">
-              <p className="eyebrow">热点详情</p>
+              <p className="eyebrow">主题来源诊断</p>
               <h2>{selected.explanation.title}</h2>
+              <div className="situation-badges">
+                <span style={{ "--situation-color": situationColor(selected) } as React.CSSProperties}>
+                  <i />
+                  {selected.quadClassLabel}
+                </span>
+                <span className={trendClassName(selected.trendLabel)}>{selected.trendLabel}</span>
+                <span>GDELT 态势倾向 {formatGoldstein(selected.weightedGoldstein)}</span>
+              </div>
               <p className="detail-summary">{selected.explanation.whatHappened}</p>
               <div className="detail-metrics">
                 <span>{selected.sourceCount} 个来源</span>
@@ -1393,8 +1646,8 @@ export function NewsMap({ dates, channels, databaseReady, initialStatus }: NewsM
                 <dd>{selected.regionName}</dd>
               </div>
               <div>
-                <dt>频道</dt>
-                <dd>{selected.channel}</dd>
+                <dt>主题</dt>
+                <dd>{themeLabel(selected.channel)}</dd>
               </div>
               <div>
                 <dt>热度</dt>
@@ -1528,7 +1781,7 @@ export function NewsMap({ dates, channels, databaseReady, initialStatus }: NewsM
             </section>
               </>
             ) : (
-              <div className="empty-detail channel-detail-empty">选择一个频道查看代表来源、故事组和来源质量。</div>
+              <div className="empty-detail channel-detail-empty">选择一个主题查看代表来源、故事组和来源质量。</div>
             )}
           </article>
         ) : (
@@ -1541,7 +1794,7 @@ export function NewsMap({ dates, channels, databaseReady, initialStatus }: NewsM
           <svg
             className={`map-canvas ${dragging ? "dragging" : ""}`}
             role="img"
-            aria-label="全球新闻热点地图"
+            aria-label="全球态势热点地图"
             viewBox={`0 0 ${size.width} ${size.height}`}
             onWheel={handleWheel}
             onPointerDown={handlePointerDown}
@@ -1566,16 +1819,26 @@ export function NewsMap({ dates, channels, databaseReady, initialStatus }: NewsM
               ))}
             </g>
             <g className="hotspot-layer">
-              {hotspotMarkers.map(({ hotspot, x, y, color, sizePx, label, ringRadius, segments, channelSummary, heatIntensity, selected }) => (
+              {hotspotMarkers.map(({ markerKey, hotspot, x, y, color, sizePx, ringRadius, themeSummary, goldsteinText, trendGlowRadius, trendGlowOpacity, selected, hovered }) => (
                 <g
                   key={`${hotspot.dataDate}-${hotspot.regionKey}`}
                   role="button"
                   tabIndex={0}
-                  aria-label={`${hotspot.regionName} 地区综合热点，${hotspot.channel}主导，覆盖 ${hotspot.channelCount} 个频道。${channelSummary}`}
-                  className={`hotspot-dot ${selected ? "selected" : ""}`}
+                  aria-label={`${hotspot.regionName} 态势热点，GDELT 态势倾向 ${goldsteinText}，${hotspot.trendLabel}，主主题 ${themeLabel(hotspot.channel)}。${themeSummary}`}
+                  className={`hotspot-dot ${selected ? "selected" : ""} ${hovered ? "hovered" : ""} ${trendClassName(hotspot.trendLabel)}`}
                   transform={`translate(${x} ${y})`}
                   style={{ "--marker-color": color, "--marker-size": `${sizePx}px` } as React.CSSProperties}
                   onPointerDown={(event) => event.stopPropagation()}
+                  onPointerOver={() => setHoveredRegionKey(markerKey)}
+                  onPointerEnter={() => setHoveredRegionKey(markerKey)}
+                  onPointerMove={() => setHoveredRegionKey(markerKey)}
+                  onPointerLeave={() => setHoveredRegionKey((current) => (current === markerKey ? null : current))}
+                  onMouseOver={() => setHoveredRegionKey(markerKey)}
+                  onMouseEnter={() => setHoveredRegionKey(markerKey)}
+                  onMouseMove={() => setHoveredRegionKey(markerKey)}
+                  onMouseLeave={() => setHoveredRegionKey((current) => (current === markerKey ? null : current))}
+                  onFocus={() => setHoveredRegionKey(markerKey)}
+                  onBlur={() => setHoveredRegionKey((current) => (current === markerKey ? null : current))}
                   onClick={() => openRegionHotspot(hotspot)}
                   onKeyDown={(event) => {
                     if (event.key === "Enter" || event.key === " ") {
@@ -1588,29 +1851,11 @@ export function NewsMap({ dates, channels, databaseReady, initialStatus }: NewsM
                   <circle className="hotspot-hit-area" r={Math.max(28, ringRadius + 8)} />
                   <circle
                     className="hotspot-heat-glow"
-                    r={ringRadius + 9 + heatIntensity * 18}
-                    opacity={0.12 + heatIntensity * 0.2}
+                    r={trendGlowRadius}
+                    opacity={trendGlowOpacity}
                   />
                   <circle className="hotspot-halo" r={ringRadius + 6} />
-                  {segments.map((segment) =>
-                    segment.path ? (
-                      <path
-                        key={segment.channel}
-                        className="hotspot-channel-ring"
-                        d={segment.path}
-                        stroke={segment.color}
-                      />
-                    ) : (
-                      <circle
-                        key={segment.channel}
-                        className="hotspot-channel-ring"
-                        r={ringRadius}
-                        stroke={segment.color}
-                      />
-                    ),
-                  )}
                   <circle className="hotspot-core" r={sizePx / 2} />
-                  <text>{label}</text>
                 </g>
               ))}
             </g>
@@ -1618,6 +1863,56 @@ export function NewsMap({ dates, channels, databaseReady, initialStatus }: NewsM
         ) : (
           <div className="map-placeholder">{mapLoadError ?? "正在加载本地地图。"}</div>
         )}
+        {hoveredMarker ? (
+          <div
+            className="hotspot-hover-card"
+            style={{
+              left: `${clamp(hoveredMarker.x + 16, 12, Math.max(12, size.width - 302))}px`,
+              top: `${clamp(hoveredMarker.y - 112, 12, Math.max(12, size.height - 220))}px`,
+              "--situation-color": hoveredMarker.color,
+            } as React.CSSProperties}
+          >
+            <strong>{hoveredMarker.hotspot.regionName}</strong>
+            <span>
+              <i />
+              GDELT {formatGoldstein(hoveredMarker.hotspot.weightedGoldstein)} · {goldsteinToneLabel(hoveredMarker.hotspot.weightedGoldstein)}
+            </span>
+            <small>
+              主导象限 {hoveredMarker.hotspot.quadClassLabel} · {hoveredMarker.hotspot.trendLabel}
+            </small>
+            {hoveredMarker.hotspot.quadClassBreakdown.length ? (
+              <div className="hover-quad-list" aria-label="QuadClass 四象限占比">
+                {hoveredMarker.hotspot.quadClassBreakdown.map((item) => (
+                  <span
+                    key={item.quadClass}
+                    className="hover-quad-row"
+                    style={{ "--situation-color": QUAD_CLASS_COLORS[item.quadClass] ?? "#64748b" } as React.CSSProperties}
+                  >
+                    <em>{item.label}</em>
+                    <b>{Math.round(item.share * 100)}%</b>
+                    <i style={{ width: `${Math.max(4, Math.round(item.share * 100))}%` }} />
+                  </span>
+                ))}
+              </div>
+            ) : null}
+            <small>
+              热度 {hoveredMarker.hotspot.heatScore.toFixed(1)} · {hoveredMarker.hotspot.eventCount} 事件 · {hoveredMarker.hotspot.sourceCount} 来源
+            </small>
+            <small>
+              较昨日 {formatHeatDelta(hoveredMarker.hotspot.heatDelta)} · 主主题 {themeLabel(hoveredMarker.hotspot.channel)}
+            </small>
+          </div>
+        ) : null}
+        <div className="goldstein-legend" aria-label="GDELT 态势倾向图例">
+          <span>GDELT 态势倾向</span>
+          <i />
+          <div>
+            <b>冲突 -10</b>
+            <b>中性 0</b>
+            <b>合作 +10</b>
+          </div>
+          <small>事件信号聚合，不等同于现实世界结论</small>
+        </div>
         <div className="map-overlay">{mapOverlayText}</div>
         <div className="map-attribution">Natural Earth · 本地 GeoJSON</div>
       </div>

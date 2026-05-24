@@ -197,6 +197,44 @@ create table if not exists map_hotspots (
   created_at timestamptz not null default now()
 );
 
+alter table map_hotspots add column if not exists dominant_quad_class smallint;
+alter table map_hotspots add column if not exists quad_class_breakdown jsonb not null default '[]'::jsonb;
+alter table map_hotspots add column if not exists weighted_goldstein numeric;
+alter table map_hotspots add column if not exists goldstein_min numeric;
+alter table map_hotspots add column if not exists goldstein_max numeric;
+alter table map_hotspots add column if not exists heat_delta numeric;
+alter table map_hotspots add column if not exists trend_label text not null default '暂无对比';
+alter table map_hotspots add column if not exists top_actors jsonb not null default '[]'::jsonb;
+
+create table if not exists map_region_daily_metrics (
+  data_date date not null,
+  region_key text not null,
+  region_name text not null,
+  country_code text,
+  centroid_lat double precision not null,
+  centroid_long double precision not null,
+  geom geometry(Point, 4326) not null,
+  primary_channel text not null check (primary_channel in ('国际', '冲突', '政治', '经济', '灾害', '社会')),
+  channel_count integer not null default 0,
+  channel_breakdown jsonb not null default '[]'::jsonb,
+  heat_score numeric not null default 0,
+  heat_delta numeric,
+  trend_label text not null default '暂无对比',
+  event_count integer not null default 0,
+  mention_count integer not null default 0,
+  article_count integer not null default 0,
+  source_count integer not null default 0,
+  source_domain_count integer not null default 0,
+  weighted_goldstein numeric,
+  goldstein_min numeric,
+  goldstein_max numeric,
+  dominant_quad_class smallint,
+  quad_class_breakdown jsonb not null default '[]'::jsonb,
+  top_actors jsonb not null default '[]'::jsonb,
+  data_updated_at timestamptz not null default now(),
+  primary key (data_date, region_key)
+);
+
 create table if not exists map_hotspot_sources (
   id bigserial primary key,
   hotspot_id bigint not null references map_hotspots(id) on delete cascade,
@@ -333,9 +371,9 @@ insert into system_parameters (key, value, value_type, description) values
   ('ranking_limit', '20', 'integer', '热点排行默认数量'),
   ('enable_gkg_loader', 'true', 'boolean', '是否装载 GKG 原始数据'),
   ('enable_mentions_heat', 'true', 'boolean', 'Mentions 是否参与热度计算'),
-  ('retention_days', '365', 'integer', '历史数据保留天数'),
+  ('retention_days', '90', 'integer', '前台产品层和趋势指标保留天数'),
   ('empty_map_keep_last_result', 'false', 'boolean', '无数据时前台是否保留旧标记'),
-  ('p2_enrichment_enabled', 'true', 'boolean', '是否启用二阶段热点解释增强任务'),
+  ('p2_enrichment_enabled', 'false', 'boolean', '是否启用批处理二阶段热点解释增强任务；关闭时由用户点击热点按需触发'),
   ('p2_top_hotspots_per_channel', '20', 'integer', '二阶段每日每频道增强的热点数量'),
   ('p2_candidate_sources_per_hotspot', '50', 'integer', '二阶段每个热点用于故事组聚类的候选来源数量'),
   ('p2_sources_per_hotspot', '12', 'integer', '二阶段每个热点抓取的代表来源数量'),
@@ -379,6 +417,9 @@ create index if not exists gdelt_mentions_clean_domain_idx on gdelt_mentions_cle
 create index if not exists map_hotspots_date_channel_heat_idx on map_hotspots (data_date desc, channel, heat_score desc);
 create index if not exists map_hotspots_region_idx on map_hotspots (region_key);
 create index if not exists map_hotspots_geom_idx on map_hotspots using gist (geom);
+create index if not exists map_region_daily_metrics_date_heat_idx on map_region_daily_metrics (data_date desc, heat_score desc);
+create index if not exists map_region_daily_metrics_region_date_idx on map_region_daily_metrics (region_key, data_date);
+create index if not exists map_region_daily_metrics_geom_idx on map_region_daily_metrics using gist (geom);
 create index if not exists map_hotspot_sources_hotspot_rank_idx on map_hotspot_sources (hotspot_id, source_rank);
 create index if not exists map_hotspot_sources_hotspot_score_idx on map_hotspot_sources (hotspot_id, source_score desc);
 create index if not exists article_metadata_domain_idx on article_metadata (source_domain);
