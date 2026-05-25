@@ -7,18 +7,6 @@ export default async function Home() {
 
   return (
     <main className="app-shell">
-      <section className="toolbar" aria-label="地图筛选">
-        <div className="brand-block">
-          <p className="eyebrow">全球态势热点</p>
-          <h1>MapNews 全球态势地图</h1>
-        </div>
-
-        <div className="status-strip">
-          <span className={workspace.databaseReady ? "status-dot ready" : "status-dot"} />
-          <span>{workspace.status.message}</span>
-        </div>
-      </section>
-
       <ErrorBoundary>
         <NewsMap
           dates={workspace.dates}

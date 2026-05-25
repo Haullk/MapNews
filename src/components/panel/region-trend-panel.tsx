@@ -98,7 +98,7 @@ export function RegionTrendPanel({ trend, message }: { trend: RegionTrend | null
           <span>态势趋势</span>
           <strong>{latestPoint ? formatGoldstein(latestPoint.weightedGoldstein) : "暂无"}</strong>
         </div>
-        <svg viewBox="0 0 300 76" role="img" aria-label={`${trend.regionName} GDELT 态势趋势`}>
+        <svg viewBox="0 0 300 76" role="img" aria-label={`${trend.regionName} 态势趋势`}>
           <line className="trend-axis" x1="8" y1="38" x2="292" y2="38" />
           <path className="trend-line goldstein" d={goldsteinPath} />
           {trend.points.map((point, index) => {

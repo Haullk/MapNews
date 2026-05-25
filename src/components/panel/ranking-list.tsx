@@ -6,12 +6,13 @@ export type ResultSortMode = "heat" | "attitude";
 interface RankingListProps {
   items: MapHotspot[];
   maxHeat: number;
+  loading: boolean;
   sortMode: ResultSortMode;
-  onSortModeChange: (mode: ResultSortMode) => void;
   selectedRegionKey: string | null;
   selectedDataDate: string | null;
+  onSortChange: (mode: ResultSortMode) => void;
   onLocate: (item: MapHotspot) => void;
-  channelColors: Record<string, string>;
+  attitudeColor: (value: number | null) => string;
   formatGoldstein: (value: number | null) => string;
   themeLabel: (channel: string) => string;
 }
@@ -21,15 +22,23 @@ function formatHeatScore(value: number) {
   return Math.round(value).toLocaleString("zh-CN");
 }
 
+function trendBadgeClass(trendLabel: string) {
+  if (trendLabel === "升温") return "warming";
+  if (trendLabel === "冷却") return "cooling";
+  if (trendLabel === "活跃") return "active";
+  return "neutral";
+}
+
 export function RankingList({
   items,
   maxHeat,
+  loading,
   sortMode,
-  onSortModeChange,
   selectedRegionKey,
   selectedDataDate,
+  onSortChange,
   onLocate,
-  channelColors,
+  attitudeColor,
   formatGoldstein,
   themeLabel,
 }: RankingListProps) {
@@ -37,12 +46,12 @@ export function RankingList({
     <div className="sidebar-section">
       <div className="section-heading ranking-heading">
         <p className="eyebrow">结果列表</p>
-        <label className="sort-control">
-          <span>排序</span>
+        <label className="ranking-sort">
+          <span>{loading && items.length > 0 ? "正在更新" : "排序方式"}</span>
           <select
             value={sortMode}
-            onChange={(event) => onSortModeChange(event.target.value as ResultSortMode)}
-            aria-label="结果列表排序"
+            onChange={(event) => onSortChange(event.target.value as ResultSortMode)}
+            aria-label="结果排序"
           >
             <option value="heat">综合热度</option>
             <option value="attitude">态势值</option>
@@ -50,9 +59,16 @@ export function RankingList({
         </label>
       </div>
       <div className="ranking-list">
+        {loading && items.length === 0 ? (
+          <div className="ranking-skeleton" aria-label="结果列表加载中">
+            {Array.from({ length: 8 }).map((_, index) => (
+              <i key={index} />
+            ))}
+          </div>
+        ) : null}
         {items.map((item, index) => {
           const selected = item.regionKey === selectedRegionKey && item.dataDate === selectedDataDate;
-          const color = channelColors[item.channel] ?? "#0f8f7f";
+          const color = attitudeColor(item.weightedGoldstein);
           return (
             <button
               key={item.id}
@@ -64,17 +80,19 @@ export function RankingList({
             >
               <span className="ranking-index">{index + 1}</span>
               <span className="ranking-title">{item.regionName}</span>
-              <strong className="ranking-meta">
-                <i className="situation-dot" />
-                {themeLabel(item.channel)} · {item.trendLabel} · 热度 {formatHeatScore(item.heatScore)} · 态势 {formatGoldstein(item.weightedGoldstein)}
-              </strong>
+              <span className="ranking-meta">
+                <span className="meta-topic">{themeLabel(item.channel)}</span>
+                <span className={`trend-badge ${trendBadgeClass(item.trendLabel)}`}>{item.trendLabel}</span>
+                <strong className="attitude-value">态势 {formatGoldstein(item.weightedGoldstein)}</strong>
+              </span>
+              <span className="ranking-heat-text">热度 {formatHeatScore(item.heatScore)}</span>
               <i className="heat-bar">
                 <b style={{ width: `${Math.max(8, Math.round((item.heatScore / maxHeat) * 100))}%` }} />
               </i>
             </button>
           );
         })}
-        {items.length === 0 ? <div className="empty-detail">当前筛选下暂无结果。</div> : null}
+        {!loading && items.length === 0 ? <div className="empty-detail">当前筛选下暂无结果。</div> : null}
       </div>
     </div>
   );

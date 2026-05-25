@@ -21,7 +21,12 @@ export interface QueryStatus {
 export interface HotspotFilters {
   date?: string;
   channel?: string;
+  /**
+   * Low-level API/debug filter. The main workspace search uses map positioning
+   * plus q-based keyword search and does not set region.
+   */
   region?: string;
+  q?: string;
   sort?: "heat" | "attitude";
   limit?: number;
   bbox?: {
@@ -163,6 +168,7 @@ export interface HotspotDetail extends MapHotspot {
 export interface DailyBrief {
   dataDate: string | null;
   hotspotCount: number;
+  hotspotDelta: number | null;
   topRegions: Array<{ name: string; count: number }>;
   topChannels: Array<{ name: string; count: number }>;
   freshnessText: string;
@@ -557,23 +563,132 @@ export async function getAvailableChannels(): Promise<readonly string[]> {
   return channels.length > 0 ? channels : DEFAULT_CHANNELS;
 }
 
-function applyFilters(filters: HotspotFilters, params: Array<string | number>, where: string[]) {
+function searchChannels(query: string) {
+  const normalized = query.trim().toLowerCase();
+  if (!normalized) return [];
+  return Object.entries(THEME_LABELS)
+    .filter(([channel, label]) => channel.toLowerCase().includes(normalized) || label.toLowerCase().includes(normalized))
+    .map(([channel]) => channel);
+}
+
+function searchTermPatterns(query: string) {
+  const normalized = query.trim();
+  const lower = normalized.toLowerCase();
+  const terms = new Set([normalized]);
+  if (normalized.includes("俄乌")) {
+    terms.add("Russia");
+    terms.add("Ukraine");
+    terms.add("Russian");
+    terms.add("Ukrainian");
+  }
+  if (normalized.includes("中美")) {
+    terms.add("China");
+    terms.add("United States");
+    terms.add("USA");
+  }
+  if (normalized.includes("地震") || lower.includes("earthquake")) {
+    terms.add("earthquake");
+    terms.add("quake");
+    terms.add("seismic");
+  }
+  if (normalized.includes("贸易") || lower.includes("trade")) {
+    terms.add("trade");
+    terms.add("tariff");
+  }
+  return Array.from(terms).map((term) => `%${term}%`);
+}
+
+function escapeSqlRegex(value: string) {
+  return value.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
+}
+
+function regionSearchPattern(region: string) {
+  const normalized = region.trim().replace(/\s+/g, " ");
+  if (!normalized) return null;
+  return `(^|[^[:alnum:]_])${escapeSqlRegex(normalized)}([^[:alnum:]_]|$)`;
+}
+
+function searchEventCodePatterns(query: string) {
+  const matches = query.trim().match(/\b\d{2,4}\b/g) ?? [];
+  return Array.from(new Set(matches)).map((term) => `${term}%`);
+}
+
+function applyFilters(filters: HotspotFilters, params: Array<string | number | string[]>, where: string[]) {
   if (filters.date) {
     params.push(filters.date);
-    where.push(`data_date = $${params.length}::date`);
+    where.push(`h.data_date = $${params.length}::date`);
   }
   if (filters.channel) {
     params.push(filters.channel);
-    where.push(`channel = $${params.length}`);
+    where.push(`h.channel = $${params.length}`);
   }
+  // Keep region as an explicit API/debug capability; the main UI does not send it.
   if (filters.region) {
-    params.push(`%${filters.region}%`);
-    where.push(`region_name ilike $${params.length}`);
+    const pattern = regionSearchPattern(filters.region);
+    if (pattern) {
+      params.push(pattern);
+      where.push(`h.region_name ~* $${params.length}`);
+    }
+  }
+  if (filters.q && filters.q.trim().length >= 2) {
+    const query = filters.q.trim();
+    params.push(searchTermPatterns(query));
+    const likeParam = `$${params.length}::text[]`;
+    const channels = searchChannels(query);
+    let channelClause = "";
+    if (channels.length > 0) {
+      params.push(channels);
+      channelClause = `or h.channel = any($${params.length}::text[])`;
+    }
+    const eventCodePatterns = searchEventCodePatterns(query);
+    let eventCodeClause = "";
+    if (eventCodePatterns.length > 0) {
+      params.push(eventCodePatterns);
+      const eventCodeParam = `$${params.length}::text[]`;
+      eventCodeClause = `
+        or exists (
+          select 1
+          from gdelt_events_clean e
+          where e.event_date = h.data_date
+            and e.region_key = h.region_key
+            and e.channel = h.channel
+            and (
+              e.event_code ilike any(${eventCodeParam})
+              or e.event_base_code ilike any(${eventCodeParam})
+              or e.event_root_code ilike any(${eventCodeParam})
+            )
+        )
+      `;
+    }
+    where.push(`
+      (
+        h.region_name ilike any(${likeParam})
+        or h.summary ilike any(${likeParam})
+        or h.channel ilike any(${likeParam})
+        or h.top_actors::text ilike any(${likeParam})
+        ${channelClause}
+        or exists (
+          select 1
+          from map_hotspot_sources s
+          left join article_metadata a on a.url = s.source_url
+          where s.hotspot_id = h.id
+            and (
+              s.title ilike any(${likeParam})
+              or s.source_domain ilike any(${likeParam})
+              or s.source_url ilike any(${likeParam})
+              or a.title ilike any(${likeParam})
+              or a.description ilike any(${likeParam})
+              or a.excerpt ilike any(${likeParam})
+            )
+        )
+        ${eventCodeClause}
+      )
+    `);
   }
   if (filters.bbox) {
     params.push(filters.bbox.west, filters.bbox.south, filters.bbox.east, filters.bbox.north);
     where.push(
-      `geom && ST_MakeEnvelope($${params.length - 3}, $${params.length - 2}, $${params.length - 1}, $${params.length}, 4326)`,
+      `h.geom && ST_MakeEnvelope($${params.length - 3}, $${params.length - 2}, $${params.length - 1}, $${params.length}, 4326)`,
     );
   }
 }
@@ -581,10 +696,10 @@ function applyFilters(filters: HotspotFilters, params: Array<string | number>, w
 export async function queryMapHotspots(filters: HotspotFilters) {
   const pool = getPool();
   const where: string[] = [];
-  const params: Array<string | number> = [];
+  const params: Array<string | number | string[]> = [];
   const date = filters.date ?? (await getDefaultDate());
   applyFilters({ ...filters, date: date ?? undefined }, params, where);
-  params.push(Math.min(Math.max(filters.limit ?? 500, 50), 1200));
+  params.push(Math.min(Math.max(filters.limit ?? 500, 1), 1200));
   const orderBy =
     filters.sort === "attitude"
       ? "weighted_goldstein asc nulls last, heat_score desc, event_count desc, region_name asc"
@@ -595,8 +710,8 @@ export async function queryMapHotspots(filters: HotspotFilters) {
   >(
     `
       with filtered as (
-        select *
-        from map_hotspots
+        select h.*
+        from map_hotspots h
         ${where.length ? `where ${where.join(" and ")}` : ""}
       ),
       quad_source as (
@@ -1122,7 +1237,7 @@ export async function getDailyBrief(date?: string): Promise<DailyBrief> {
   if (!dataDate) {
     return emptyBrief("暂无可展示数据。");
   }
-  const [result, status] = await Promise.all([
+  const [result, previousResult, status] = await Promise.all([
     pool.query<{
       data_date: string;
       hotspot_count: number | string;
@@ -1138,6 +1253,16 @@ export async function getDailyBrief(date?: string): Promise<DailyBrief> {
       `,
       [dataDate],
     ),
+    pool.query<{ hotspot_count: number | string }>(
+      `
+        select hotspot_count
+        from daily_briefs
+        where data_date < $1::date
+        order by data_date desc
+        limit 1
+      `,
+      [dataDate],
+    ),
     getDataStatus(),
   ]);
   const row = result.rows[0];
@@ -1147,6 +1272,9 @@ export async function getDailyBrief(date?: string): Promise<DailyBrief> {
   return {
     dataDate: row.data_date,
     hotspotCount: Number(row.hotspot_count),
+    hotspotDelta: previousResult.rows[0]
+      ? Number(row.hotspot_count) - Number(previousResult.rows[0].hotspot_count)
+      : null,
     topRegions: row.top_regions,
     topChannels: row.top_channels,
     freshnessText: `数据覆盖至 ${row.data_updated_at}`,
@@ -1159,6 +1287,7 @@ function emptyBrief(text: string, dataDate: string | null = null): DailyBrief {
   return {
     dataDate,
     hotspotCount: 0,
+    hotspotDelta: null,
     topRegions: [],
     topChannels: [],
     freshnessText: "暂无最近数据。",

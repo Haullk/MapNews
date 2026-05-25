@@ -3,8 +3,10 @@ import {
   type RefObject,
   type WheelEvent as ReactWheelEvent,
   type CSSProperties,
+  useState,
 } from "react";
 import type { MapHotspot } from "@/lib/hotspots";
+import { AttitudeIndicator } from "@/components/shared/attitude-indicator";
 import { HotspotLayer, type HotspotMarkerView } from "./hotspot-layer";
 
 interface MapSize {
@@ -42,6 +44,10 @@ interface MapRendererProps {
   onPointerDown: (event: ReactPointerEvent<SVGSVGElement>) => void;
   onPointerMove: (event: ReactPointerEvent<SVGSVGElement>) => void;
   onPointerUp: (event: ReactPointerEvent<SVGSVGElement>) => void;
+  onZoomIn: () => void;
+  onZoomOut: () => void;
+  onResetView: () => void;
+  onFitResults: () => void;
   onHoverRegion: (markerKey: string | null) => void;
   onOpenRegion: (hotspot: MapHotspot) => void;
   trendClassName: (trendLabel: string) => string;
@@ -49,11 +55,16 @@ interface MapRendererProps {
   formatGoldstein: (value: number | null) => string;
   goldsteinToneLabel: (value: number | null) => string;
   formatHeatDelta: (value: number | null) => string;
-  quadClassColors: Record<number, string>;
 }
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
+}
+
+function formatCompactNumber(value: number) {
+  if (!Number.isFinite(value)) return "0";
+  if (Math.abs(value) >= 10000) return `${(value / 10000).toFixed(1)}万`;
+  return Math.round(value).toLocaleString("zh-CN");
 }
 
 export function MapRenderer({
@@ -73,6 +84,10 @@ export function MapRenderer({
   onPointerDown,
   onPointerMove,
   onPointerUp,
+  onZoomIn,
+  onZoomOut,
+  onResetView,
+  onFitResults,
   onHoverRegion,
   onOpenRegion,
   trendClassName,
@@ -80,8 +95,9 @@ export function MapRenderer({
   formatGoldstein,
   goldsteinToneLabel,
   formatHeatDelta,
-  quadClassColors,
 }: MapRendererProps) {
+  const [legendOpen, setLegendOpen] = useState(true);
+
   return (
     <div className="map-stage" ref={mapRef}>
       {mapReady ? (
@@ -112,6 +128,7 @@ export function MapRenderer({
               </text>
             ))}
           </g>
+          <rect className="map-click-catcher" width={size.width} height={size.height} />
           <HotspotLayer
             markers={hotspotMarkers}
             onHoverRegion={onHoverRegion}
@@ -133,45 +150,56 @@ export function MapRenderer({
           } as CSSProperties}
         >
           <strong>{hoveredMarker.hotspot.regionName}</strong>
-          <span>
-            <i />
-            GDELT {formatGoldstein(hoveredMarker.hotspot.weightedGoldstein)} · {goldsteinToneLabel(hoveredMarker.hotspot.weightedGoldstein)}
-          </span>
-          <small>
-            主导象限 {hoveredMarker.hotspot.quadClassLabel} · {hoveredMarker.hotspot.trendLabel}
-          </small>
-          {hoveredMarker.hotspot.quadClassBreakdown.length ? (
-            <div className="hover-quad-list" aria-label="QuadClass 四象限占比">
-              {hoveredMarker.hotspot.quadClassBreakdown.map((item) => (
-                <span
-                  key={item.quadClass}
-                  className="hover-quad-row"
-                  style={{ "--situation-color": quadClassColors[item.quadClass] ?? "#64748b" } as CSSProperties}
-                >
-                  <em>{item.label}</em>
-                  <b>{Math.round(item.share * 100)}%</b>
-                  <i style={{ width: `${Math.max(4, Math.round(item.share * 100))}%` }} />
-                </span>
-              ))}
-            </div>
-          ) : null}
-          <small>
-            热度 {hoveredMarker.hotspot.heatScore.toFixed(1)} · {hoveredMarker.hotspot.eventCount} 事件 · {hoveredMarker.hotspot.sourceCount} 来源
-          </small>
-          <small>
-            较昨日 {formatHeatDelta(hoveredMarker.hotspot.heatDelta)} · {themeLabel(hoveredMarker.hotspot.channel)}
-          </small>
+          <div className="hover-metric-grid">
+            <span>
+              <em>综合热度</em>
+              <b>{formatCompactNumber(hoveredMarker.hotspot.heatScore)}</b>
+            </span>
+            <span>
+              <em>来源</em>
+              <b>{formatCompactNumber(hoveredMarker.hotspot.sourceCount)}</b>
+            </span>
+          </div>
+          <AttitudeIndicator
+            value={hoveredMarker.hotspot.weightedGoldstein}
+            valueText={formatGoldstein(hoveredMarker.hotspot.weightedGoldstein)}
+            toneText={goldsteinToneLabel(hoveredMarker.hotspot.weightedGoldstein)}
+            compact
+          />
+          <div className="hover-footer-row">
+            <span>{themeLabel(hoveredMarker.hotspot.channel)}</span>
+            <span>{hoveredMarker.hotspot.trendLabel}</span>
+            <span>{hoveredMarker.hotspot.eventCount} 个事件信号</span>
+          </div>
+          <small>较昨日 {formatHeatDelta(hoveredMarker.hotspot.heatDelta)} · 点击查看热点详情</small>
         </div>
       ) : null}
-      <div className="goldstein-legend" aria-label="GDELT 态势倾向图例">
-        <span>GDELT 态势倾向</span>
-        <i />
-        <div>
-          <b>冲突 -10</b>
-          <b>中性 0</b>
-          <b>合作 +10</b>
-        </div>
-        <small>事件信号聚合，不等同于现实世界结论</small>
+      <div className="map-controls" aria-label="地图控制">
+        <button type="button" onClick={onZoomIn} aria-label="放大地图">+</button>
+        <button type="button" onClick={onZoomOut} aria-label="缩小地图">-</button>
+        <button type="button" onClick={onResetView}>全球</button>
+        <button type="button" onClick={onFitResults}>适配</button>
+      </div>
+      <div className={`goldstein-legend ${legendOpen ? "" : "collapsed"}`} aria-label="态势倾向图例">
+        <button
+          className="legend-toggle"
+          type="button"
+          aria-expanded={legendOpen}
+          onClick={() => setLegendOpen((current) => !current)}
+        >
+          态势倾向
+        </button>
+        {legendOpen ? (
+          <>
+            <i />
+            <div>
+              <b>冲突倾向</b>
+              <b>中性混合</b>
+              <b>合作倾向</b>
+            </div>
+            <small>基于公开报道信号聚合，不等同于现实世界结论</small>
+          </>
+        ) : null}
       </div>
       <div className="map-overlay">{mapOverlayText}</div>
       <div className="map-attribution">Natural Earth · 本地 GeoJSON</div>

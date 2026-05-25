@@ -156,7 +156,7 @@ export function ChannelDetail({
           </div>
           <div>
             <span className={trendClassName(selected.trendLabel)}>{selected.trendLabel}</span>
-            <span>GDELT {formatGoldstein(selected.weightedGoldstein)}</span>
+            <span>态势 {formatGoldstein(selected.weightedGoldstein)}</span>
           </div>
         </div>
         <div className="supporting-metrics overview-metrics">

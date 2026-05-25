@@ -23,13 +23,14 @@ import {
   type MapView,
 } from "@/components/hooks/use-map-geometry";
 import type { HotspotMarkerView } from "@/components/map/hotspot-layer";
-import { useWorkspaceData } from "@/components/hooks/use-workspace-data";
+import { useWorkspaceData, type WorkspaceFilters } from "@/components/hooks/use-workspace-data";
 import { MapRenderer } from "@/components/map/map-renderer";
-import { DemoStatePanel } from "@/components/panel/demo-state-panel";
+import { DailyBriefCard } from "@/components/panel/daily-brief-card";
 import { DetailsDrawer, type DetailTab } from "@/components/panel/details-drawer";
 import { RankingList, type ResultSortMode } from "@/components/panel/ranking-list";
 import type {
   DataStatus,
+  DailyBrief,
   HotspotDetail,
   MapHotspot,
   QueryStatus,
@@ -45,12 +46,6 @@ interface NewsMapProps {
   initialHotspotStatus: QueryStatus;
 }
 
-interface Filters {
-  date: string;
-  channel: string;
-  region: string;
-}
-
 interface SearchTarget {
   id: string;
   type: "country" | "region" | "place";
@@ -64,6 +59,7 @@ interface SearchTarget {
 }
 
 type RegionTrendPayload = { trend: RegionTrend };
+type DailyBriefPayload = { brief: DailyBrief };
 type EnrichmentState = {
   hotspotId: number;
   status: "running" | "success" | "error";
@@ -353,8 +349,9 @@ function goldsteinToneLabel(value: number | null) {
 
 function trendClassName(trendLabel: string) {
   if (trendLabel === "升温") return "warming";
+  if (trendLabel === "活跃") return "active";
   if (trendLabel === "冷却") return "cooling";
-  return "active";
+  return "no-comparison";
 }
 
 function trendGlowFor(trendLabel: string, ringRadius: number) {
@@ -448,6 +445,29 @@ function declutterHotspotMarkers(markers: HotspotMarkerView[], zoom: number) {
     if (a.selected !== b.selected) return a.selected ? 1 : -1;
     return a.hotspot.heatScore - b.hotspot.heatScore;
   });
+}
+
+function orderVisibleHotspotMarkers(markers: HotspotMarkerView[]) {
+  return [...markers].sort((a, b) => {
+    if (a.selected !== b.selected) return a.selected ? 1 : -1;
+    return a.hotspot.heatScore - b.hotspot.heatScore;
+  });
+}
+
+function searchTargetMatchesHotspot(target: SearchTarget, hotspot: MapHotspot) {
+  const regionName = normalizeSearchText(hotspot.regionName);
+  const queryName = normalizeSearchText(target.queryName);
+  const label = normalizeSearchText(target.label);
+  return (
+    regionName === queryName ||
+    regionName === label ||
+    regionName.startsWith(`${queryName},`) ||
+    regionName.startsWith(`${label},`)
+  );
+}
+
+function findHotspotForSearchTarget(target: SearchTarget, hotspots: MapHotspot[]) {
+  return hotspots.find((hotspot) => searchTargetMatchesHotspot(target, hotspot)) ?? null;
 }
 
 function hotspotNeedsEnrichment(hotspot: HotspotDetail) {
@@ -664,7 +684,7 @@ export function NewsMap({
   const mapViewRef = useRef<MapView>({ x: 0, y: 0, k: 1 });
   const pendingMapViewRef = useRef<MapView | null>(null);
   const mapFrameRef = useRef<number | null>(null);
-  const dragRef = useRef<{ pointerId: number; x: number; y: number; moved: boolean } | null>(null);
+  const dragRef = useRef<{ pointerId: number; x: number; y: number; moved: boolean; startedOnBlank: boolean } | null>(null);
   const sortLoadReadyRef = useRef(false);
 
   const [assets, setAssets] = useState<MapAssets | null>(null);
@@ -679,23 +699,35 @@ export function NewsMap({
   const [sourceMessage, setSourceMessage] = useState<string | null>(null);
   const [regionTrend, setRegionTrend] = useState<RegionTrend | null>(null);
   const [regionTrendMessage, setRegionTrendMessage] = useState<string | null>(null);
+  const [dailyBrief, setDailyBrief] = useState<DailyBrief | null>(null);
+  const [dailyBriefLoading, setDailyBriefLoading] = useState(false);
+  const [dailyBriefMessage, setDailyBriefMessage] = useState<string | null>(null);
   const [hoveredRegionKey, setHoveredRegionKey] = useState<string | null>(null);
   const [expandedStoryId, setExpandedStoryId] = useState<number | null>(null);
   const [enrichmentState, setEnrichmentState] = useState<EnrichmentState | null>(null);
   const [searchText, setSearchText] = useState("");
   const [searchMessage, setSearchMessage] = useState<string | null>(null);
   const [resultSortMode, setResultSortMode] = useState<ResultSortMode>("heat");
-  const [filters, setFilters] = useState<Filters>({ date: dates[0] ?? "", channel: "", region: "" });
+  const [filters, setFilters] = useState<WorkspaceFilters>({ date: dates[0] ?? "", channel: "", q: "" });
+  const [locatedTarget, setLocatedTarget] = useState<SearchTarget | null>(null);
+  const [pendingSearchTarget, setPendingSearchTarget] = useState<SearchTarget | null>(null);
 
   const { projection, mapContentBounds, countryPaths, regionPaths, mapLabels } = useMapGeometry(assets, size, mapView);
   const mapReady = Boolean(assets && projection && size.width > 0 && size.height > 0);
+  const showAllMapMarkers = mapView.k > 8;
   const queryParams = useCallback(
-    (withBounds: boolean) => {
+    (withBounds: boolean, purpose: "map" | "ranking" = "map") => {
       const params = new URLSearchParams();
       if (filters.date) params.set("date", filters.date);
       if (filters.channel) params.set("channel", filters.channel);
-      if (filters.region) params.set("region", filters.region);
+      if (filters.q) params.set("q", filters.q);
       if (resultSortMode === "attitude") params.set("sort", "attitude");
+      if (purpose === "ranking") {
+        params.set("limit", "20");
+        return params;
+      } else if (filters.q || mapViewRef.current.k > 8) {
+        params.set("limit", "1200");
+      }
       if (withBounds) {
         const bbox = bboxFromView(projectionRef.current, mapViewRef.current, sizeRef.current);
         if (bbox && bbox.east > bbox.west && bbox.north > bbox.south) {
@@ -710,6 +742,7 @@ export function NewsMap({
     [filters, resultSortMode],
   );
   const currentViewportKey = mapReady ? viewportKey(projection, mapView, size) : null;
+  const workspaceViewportKey = currentViewportKey;
   const hasInitialWorkspacePayload =
     initialHotspotStatus.ok || initialHotspots.length > 0 || !databaseReady;
   const {
@@ -729,7 +762,7 @@ export function NewsMap({
     initialHotspots,
     initialHotspotStatus,
     hasInitialWorkspacePayload,
-    viewportKey: currentViewportKey,
+    viewportKey: workspaceViewportKey,
     queryParams,
   });
   const systemEmpty = !loading && hotspots.length === 0 && (!databaseReady || (!status.currentDataDate && dates.length === 0));
@@ -741,13 +774,13 @@ export function NewsMap({
     [rawDisplayRanking, resultSortMode],
   );
   const candidateHotspots = useMemo(() => {
-    const limit = hotspotCandidateLimitForZoom(mapView.k, displayHotspots.length);
+    const limit = showAllMapMarkers ? displayHotspots.length : hotspotCandidateLimitForZoom(mapView.k, displayHotspots.length);
     const candidates = displayHotspots.slice(0, limit);
     if (selectedRegion && !candidates.some((hotspot) => hotspot.regionKey === selectedRegion.regionKey && hotspot.dataDate === selectedRegion.dataDate)) {
       candidates.push(selectedRegion);
     }
     return candidates;
-  }, [displayHotspots, mapView.k, selectedRegion]);
+  }, [displayHotspots, mapView.k, selectedRegion, showAllMapMarkers]);
   const hotspotHeatScale = useMemo(() => {
     const values = displayHotspots
       .map((hotspot) => hotspot.heatScore)
@@ -775,6 +808,34 @@ export function NewsMap({
   const searchTargets = useMemo(() => buildSearchTargets(assets), [assets]);
 
   useEffect(() => {
+    if (!databaseReady) return;
+    const controller = new AbortController();
+    const params = new URLSearchParams();
+    if (filters.date) params.set("date", filters.date);
+    setDailyBriefLoading(true);
+    setDailyBriefMessage(null);
+    void fetch(`/api/daily-brief?${params.toString()}`, {
+      cache: "no-store",
+      signal: controller.signal,
+    })
+      .then(async (response) => {
+        const payload = (await response.json()) as Partial<DailyBriefPayload> & { error?: string };
+        if (!response.ok || !payload.brief) {
+          throw new Error(payload.error ?? "简报加载失败。");
+        }
+        setDailyBrief(payload.brief);
+      })
+      .catch((error) => {
+        if (error instanceof DOMException && error.name === "AbortError") return;
+        setDailyBriefMessage(error instanceof Error ? error.message : "简报加载失败。");
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setDailyBriefLoading(false);
+      });
+    return () => controller.abort();
+  }, [databaseReady, filters.date]);
+
+  useEffect(() => {
     if (!databaseReady || !mapReady) return;
     if (!sortLoadReadyRef.current) {
       sortLoadReadyRef.current = true;
@@ -783,6 +844,19 @@ export function NewsMap({
     preserveRankingForViewport(0);
     scheduleHotspotLoad();
   }, [databaseReady, mapReady, preserveRankingForViewport, resultSortMode, scheduleHotspotLoad]);
+
+  useEffect(() => {
+    if (!pendingSearchTarget || loading) return;
+    const hotspot = findHotspotForSearchTarget(pendingSearchTarget, displayHotspots);
+    if (!hotspot) {
+      setSearchMessage(`已定位到 ${pendingSearchTarget.label}，当前范围暂无匹配热点。`);
+      setPendingSearchTarget(null);
+      return;
+    }
+    openRegionHotspot(hotspot);
+    setSearchMessage(`已定位到 ${pendingSearchTarget.label}，已打开匹配热点。`);
+    setPendingSearchTarget(null);
+  }, [displayHotspots, loading, pendingSearchTarget]);
 
   const hotspotMarkers = useMemo(() => {
     if (!projection) return [];
@@ -822,8 +896,8 @@ export function NewsMap({
         };
       })
       .filter((item): item is NonNullable<typeof item> => item !== null);
-    return declutterHotspotMarkers(candidateMarkers, mapView.k);
-  }, [candidateHotspots, hotspotHeatScale, hoveredRegionKey, mapView, projection, selectedRegion, size]);
+    return showAllMapMarkers ? orderVisibleHotspotMarkers(candidateMarkers) : declutterHotspotMarkers(candidateMarkers, mapView.k);
+  }, [candidateHotspots, hotspotHeatScale, hoveredRegionKey, mapView, projection, selectedRegion, showAllMapMarkers, size]);
 
   const hoveredMarker = useMemo(
     () => hotspotMarkers.find((marker) => marker.markerKey === hoveredRegionKey) ?? null,
@@ -961,6 +1035,10 @@ export function NewsMap({
     });
   }
 
+  function resetToGlobalView() {
+    setMapView({ x: 0, y: 0, k: 1 });
+  }
+
   function fitFeature(feature: Feature<Geometry, MapProperties>, maxZoom: number) {
     if (!projection || size.width <= 0 || size.height <= 0) return;
     const localPath = geoPath(projection);
@@ -980,6 +1058,15 @@ export function NewsMap({
     });
   }
 
+  function closeDetailsDrawer() {
+    setSelectedRegion(null);
+    setSelected(null);
+    setExpandedStoryId(null);
+    setEnrichmentState(null);
+    setSourceMessage(null);
+    setDetailTab("region");
+  }
+
   function focusSearchTarget(target: SearchTarget) {
     if (target.feature) {
       fitFeature(target.feature, target.type === "country" ? 4.2 : 9.5);
@@ -988,6 +1075,62 @@ export function NewsMap({
     if (typeof target.lng === "number" && typeof target.lat === "number") {
       zoomToPoint(target.lng, target.lat, target.type === "place" ? 12 : 9);
     }
+  }
+
+  function zoomBy(factor: number) {
+    if (size.width <= 0 || size.height <= 0) return;
+    const current = mapViewRef.current;
+    const centerX = size.width / 2;
+    const centerY = size.height / 2;
+    const nextZoom = clamp(current.k * factor, MAP_VIEW_MIN_ZOOM, MAP_VIEW_MAX_ZOOM);
+    const localX = (centerX - current.x) / current.k;
+    const localY = (centerY - current.y) / current.k;
+    setMapView({
+      k: nextZoom,
+      x: centerX - localX * nextZoom,
+      y: centerY - localY * nextZoom,
+    });
+    scheduleHotspotLoad("viewport");
+  }
+
+  function handleResetMapView() {
+    resetToGlobalView();
+    scheduleHotspotLoad("viewport");
+  }
+
+  function fitCurrentResults() {
+    if (!projection || size.width <= 0 || size.height <= 0) return;
+    const points = displayHotspots
+      .map((hotspot) => projection([hotspot.lng, hotspot.lat]))
+      .filter((point): point is [number, number] => Boolean(point));
+    if (points.length === 0) {
+      setSearchMessage("当前结果为空，无法适配地图范围。");
+      return;
+    }
+    if (points.length === 1) {
+      const hotspot = displayHotspots[0];
+      if (hotspot) zoomToPoint(hotspot.lng, hotspot.lat, Math.max(mapViewRef.current.k, 7));
+      scheduleHotspotLoad("viewport");
+      return;
+    }
+    const x0 = Math.min(...points.map((point) => point[0]));
+    const x1 = Math.max(...points.map((point) => point[0]));
+    const y0 = Math.min(...points.map((point) => point[1]));
+    const y1 = Math.max(...points.map((point) => point[1]));
+    const dx = Math.max(1, x1 - x0);
+    const dy = Math.max(1, y1 - y0);
+    const padding = Math.min(180, Math.max(72, Math.min(size.width, size.height) * 0.18));
+    const k = clamp(
+      Math.min((size.width - padding) / dx, (size.height - padding) / dy),
+      MAP_VIEW_MIN_ZOOM,
+      MAP_VIEW_MAX_ZOOM,
+    );
+    setMapView({
+      k,
+      x: size.width / 2 - ((x0 + x1) / 2) * k,
+      y: size.height / 2 - ((y0 + y1) / 2) * k,
+    });
+    scheduleHotspotLoad("viewport");
   }
 
   function handleWheel(event: ReactWheelEvent<SVGSVGElement>) {
@@ -1007,13 +1150,14 @@ export function NewsMap({
       x: mouseX - localX * nextZoom,
       y: mouseY - localY * nextZoom,
     });
-    scheduleHotspotLoad();
+    scheduleHotspotLoad("viewport");
   }
 
   function handlePointerDown(event: ReactPointerEvent<SVGSVGElement>) {
     if (event.button !== 0 || !mapReady) return;
     event.currentTarget.setPointerCapture(event.pointerId);
-    dragRef.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY, moved: false };
+    const startedOnBlank = event.target instanceof Element && event.target.classList.contains("map-click-catcher");
+    dragRef.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY, moved: false, startedOnBlank };
     setDragging(true);
   }
 
@@ -1034,7 +1178,13 @@ export function NewsMap({
     if (!drag || drag.pointerId !== event.pointerId) return;
     dragRef.current = null;
     setDragging(false);
-    if (drag.moved) scheduleHotspotLoad();
+    if (drag.moved) {
+      scheduleHotspotLoad("viewport");
+      return;
+    }
+    if (drag.startedOnBlank) {
+      closeDetailsDrawer();
+    }
   }
 
   async function fetchHotspotDetail(id: number) {
@@ -1164,30 +1314,54 @@ export function NewsMap({
     preserveRankingForViewport(1200);
     zoomToPoint(item.lng, item.lat, 10.5);
     openRegionHotspot(item);
-    if (item.id >= 0) scheduleHotspotLoad();
+    if (item.id >= 0) scheduleHotspotLoad("viewport");
   }
 
-  function searchRegion() {
+  function searchWorkspace() {
     const rawSearch = searchText.trim();
     if (!rawSearch) {
-      setFilters((prev) => ({ ...prev, region: "" }));
-      setSearchMessage(null);
-      setMessage("已清除地区筛选。");
-      scheduleHotspotLoad();
+      setFilters((prev) => ({ ...prev, q: "" }));
+      setLocatedTarget(null);
+      setPendingSearchTarget(null);
+      closeDetailsDrawer();
+      setSearchMessage("已清除搜索筛选。");
+      setMessage("已清除搜索筛选。");
+      resetToGlobalView();
+      scheduleHotspotLoad("viewport");
       return;
     }
 
     const target = findSearchTarget(rawSearch, searchTargets);
-    if (!target) {
-      setSearchMessage("未找到地区，可尝试英文/中文地名。");
+    if (target) {
+      focusSearchTarget(target);
+      setSearchMessage(`已定位到 ${target.label}，正在匹配该地区热点数据。`);
+      setLocatedTarget(target);
+      setPendingSearchTarget(target);
+      setFilters((prev) => (prev.q ? { ...prev, q: "" } : prev));
+      const hotspot = findHotspotForSearchTarget(target, displayHotspots);
+      if (hotspot) {
+        openRegionHotspot(hotspot);
+        setSearchMessage(`已定位到 ${target.label}，已打开匹配热点。`);
+        setPendingSearchTarget(null);
+      }
+      scheduleHotspotLoad("viewport");
       return;
     }
 
-    focusSearchTarget(target);
-    setSearchMessage(`已定位到 ${target.label}`);
+    if (rawSearch.length < 2) {
+      setSearchMessage("搜索词至少需要 2 个字符。");
+      setMessage("搜索词至少需要 2 个字符。");
+      return;
+    }
+
+    resetToGlobalView();
+    setLocatedTarget(null);
+    setPendingSearchTarget(null);
+    closeDetailsDrawer();
+    setSearchMessage(`正在全局搜索「${rawSearch}」`);
     setFilters((prev) => {
-      const next = { ...prev, region: target.queryName };
-      if (prev.region === next.region) scheduleHotspotLoad();
+      const next = { ...prev, q: rawSearch };
+      if (prev.q === next.q) scheduleHotspotLoad("viewport");
       return next;
     });
   }
@@ -1208,7 +1382,7 @@ export function NewsMap({
   const workspaceNotice = !databaseReady
     ? {
         title: "数据库暂不可用",
-        body: status.message || "当前无法连接 PostgreSQL，地图会在数据服务恢复后自动显示真实热点。",
+        body: "当前无法连接数据服务，地图会在恢复后自动显示真实热点。",
       }
     : !loading && hotspots.length === 0
       ? status.currentDataDate || filters.date
@@ -1218,158 +1392,216 @@ export function NewsMap({
           }
         : {
             title: "暂无可展示数据",
-            body: "数据库已连接，但还没有可展示的地图热点。请先运行 GDELT 导入和清洗任务。",
+            body: "当前日期或话题下没有可展示的地图热点。",
         }
       : null;
+  const currentScopeText = filters.q ? `搜索「${filters.q}」` : "当前视野";
+  const displayHotspotKeys = new Set(displayHotspots.map((hotspot) => `${hotspot.regionKey}:${hotspot.dataDate}`));
+  const visibleResultMarkerCount = hotspotMarkers.filter((marker) => displayHotspotKeys.has(`${marker.hotspot.regionKey}:${marker.hotspot.dataDate}`)).length;
+  const hiddenMarkerCount = Math.max(0, displayHotspots.length - visibleResultMarkerCount);
+  const markerScopeText = filters.q ? "地图显示" : "当前视野显示";
+  const markerItemText = filters.q ? "结果" : "热点";
+  const markerCountText = hiddenMarkerCount > 0
+    ? `${markerScopeText} ${visibleResultMarkerCount}/${displayHotspots.length} 个${markerItemText} · 已隐藏 ${hiddenMarkerCount} 个重叠${markerItemText}，放大查看`
+    : `${markerScopeText} ${visibleResultMarkerCount}/${displayHotspots.length} 个${markerItemText}`;
   const mapOverlayText = mapLoadError
     ? mapLoadError
     : showDemoMode
       ? `演示数据 · 当前地图显示 ${hotspotMarkers.length}/${displayHotspots.length} 个示例热点`
-      : loading && hotspots.length === 0
+    : loading && hotspots.length === 0
       ? "正在加载热点..."
-      : `${loading ? "正在刷新热点..." : message ?? status.message} · 当前地图显示 ${hotspotMarkers.length}/${displayHotspots.length} 个热点`;
+      : `${loading ? "正在刷新热点..." : currentScopeText} · ${markerCountText}`;
+  const latestDataDate = status.currentDataDate ?? status.latestSuccessfulImportDate ?? filters.date ?? "暂无";
 
   return (
-    <section className={`map-workspace ${selectedRegion ? "has-detail-drawer" : ""}`}>
-      <aside className="control-panel" aria-label="全球态势热点工作台">
-        <div className="sidebar-section filters-grid">
-          <div className="section-heading">
-            <p className="eyebrow">筛选</p>
-          </div>
-          <div className="filter-row">
-            <label>
-              日期
-              <select value={filters.date} onChange={(event) => setFilters((prev) => ({ ...prev, date: event.target.value }))}>
-                <option value="">最近可用</option>
-                {dates.map((date) => (
-                  <option key={date} value={date}>
-                    {date}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label>
-              话题
-              <select
-                value={filters.channel}
-                onChange={(event) => setFilters((prev) => ({ ...prev, channel: event.target.value }))}
-              >
-                <option value="">全部话题</option>
-                {channels.map((channel) => (
-                  <option key={channel} value={channel}>
-                    {themeLabel(channel)}
-                  </option>
-                ))}
-              </select>
-            </label>
-          </div>
-          <label className="region-search">
-            地区搜索
-            <span className="search-row">
-              <input
-                value={searchText}
-                onChange={(event) => setSearchText(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter") {
-                    event.preventDefault();
-                    searchRegion();
-                  }
-                }}
-                placeholder="国家、省州、城市"
-              />
-              <button type="button" onClick={searchRegion}>
-                搜索
-              </button>
-            </span>
-            {searchMessage ? <span className="map-search-message">{searchMessage}</span> : null}
-          </label>
+    <>
+      <section className="toolbar" aria-label="地图筛选">
+        <div className="brand-block">
+          <p className="eyebrow">全球态势热点</p>
+          <h1>MapNews 全球态势地图</h1>
         </div>
 
-        <div className="sidebar-section current-view-section">
-          <p className="eyebrow">当前结果</p>
-          <p>
-            {status.currentDataDate ?? filters.date ?? "暂无日期"} · {showDemoMode ? `演示 ${displayHotspots.length} 个热点` : `共 ${displayHotspots.length} 个热点`} · 地图显示 {hotspotMarkers.length} 个
-          </p>
-        </div>
-
-        <DemoStatePanel status={status} demoMode={showDemoMode} />
-
-        {workspaceNotice ? (
-          <div className="workspace-state">
-            <strong>{workspaceNotice.title}</strong>
-            <span>{workspaceNotice.body}</span>
-          </div>
-        ) : null}
-
-        <RankingList
-          items={displayRanking}
-          maxHeat={maxRankingHeat}
-          sortMode={resultSortMode}
-          onSortModeChange={setResultSortMode}
-          selectedRegionKey={selectedRegion?.regionKey ?? null}
-          selectedDataDate={selectedRegion?.dataDate ?? null}
-          onLocate={locateRankingItem}
-          channelColors={CHANNEL_COLORS}
-          formatGoldstein={formatGoldstein}
+        <DailyBriefCard
+          brief={dailyBrief}
+          loading={dailyBriefLoading}
+          message={dailyBriefMessage}
           themeLabel={themeLabel}
+          variant="toolbar"
         />
-      </aside>
 
-      <MapRenderer
-        mapRef={mapEl}
-        mapReady={mapReady}
-        mapLoadError={mapLoadError}
-        size={size}
-        dragging={dragging}
-        baseMapTransform={baseMapTransform}
-        countryPaths={countryPaths}
-        regionPaths={regionPaths}
-        mapLabels={mapLabels}
-        hotspotMarkers={hotspotMarkers}
-        hoveredMarker={hoveredMarker}
-        mapOverlayText={mapOverlayText}
-        onWheel={handleWheel}
-        onPointerDown={handlePointerDown}
-        onPointerMove={handlePointerMove}
-        onPointerUp={handlePointerUp}
-        onHoverRegion={(markerKey) => {
-          setHoveredRegionKey((current) => (markerKey === null && current === null ? current : markerKey));
-        }}
-        onOpenRegion={openRegionHotspot}
-        trendClassName={trendClassName}
-        themeLabel={themeLabel}
-        formatGoldstein={formatGoldstein}
-        goldsteinToneLabel={goldsteinToneLabel}
-        formatHeatDelta={formatHeatDelta}
-        quadClassColors={QUAD_CLASS_COLORS}
-      />
+        <div className="latest-data-badge">
+          <span>最新数据</span>
+          <strong>{latestDataDate}</strong>
+        </div>
+      </section>
 
-      {selectedRegion ? (
-        <DetailsDrawer
-          region={selectedRegion}
-          selected={selected}
-          rank={selectedRegionRank}
-          totalHotspots={displayHotspots.length}
-          activeTab={detailTab}
-          onTabChange={setDetailTab}
-          regionTrend={regionTrend}
-          regionTrendMessage={regionTrendMessage}
-          onOpenChannelHotspot={openChannelHotspot}
-          sourceLoading={sourceLoading}
-          sourceMessage={sourceMessage}
-          enrichmentState={selectedEnrichmentState}
-          expandedStoryId={expandedStoryId}
-          onToggleStory={(id) => setExpandedStoryId((current) => (current === id ? null : id))}
-          hotspotNeedsEnrichment={hotspotNeedsEnrichment}
-          channelColors={CHANNEL_COLORS}
-          quadClassColors={QUAD_CLASS_COLORS}
-          situationColor={situationColor}
+      <section className={`map-workspace ${selectedRegion ? "has-detail-drawer" : ""}`}>
+        <aside className="control-panel" aria-label="全球态势热点工作台">
+          <form
+            className="sidebar-section sidebar-search-card"
+            onSubmit={(event) => {
+              event.preventDefault();
+              searchWorkspace();
+            }}
+          >
+            <div className="sidebar-filter-grid">
+              <label className="sidebar-field">
+                <span>日期</span>
+                <select value={filters.date} onChange={(event) => setFilters((prev) => ({ ...prev, date: event.target.value }))}>
+                  <option value="">最近可用</option>
+                  {dates.map((date) => (
+                    <option key={date} value={date}>
+                      {date}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="sidebar-field">
+                <span>话题</span>
+                <select
+                  value={filters.channel}
+                  onChange={(event) => setFilters((prev) => ({ ...prev, channel: event.target.value }))}
+                >
+                  <option value="">全部话题</option>
+                  {channels.map((channel) => (
+                    <option key={channel} value={channel}>
+                      {themeLabel(channel)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            <label className="sidebar-search">
+              <span>搜索</span>
+              <span className="sidebar-search-row">
+                <input
+                  value={searchText}
+                  onChange={(event) => setSearchText(event.target.value)}
+                  placeholder="输入地名定位地图，也可搜事件/参与方"
+                />
+                <button type="submit">搜索</button>
+              </span>
+            </label>
+            {searchMessage ? <small>{searchMessage}</small> : null}
+            {locatedTarget || filters.q ? (
+              <div className="active-filter-chips" aria-label="已启用搜索状态">
+                {locatedTarget ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setLocatedTarget(null);
+                      setPendingSearchTarget(null);
+                      setSearchMessage("已清除定位状态。");
+                    }}
+                  >
+                    定位: {locatedTarget.label} ×
+                  </button>
+                ) : null}
+                {filters.q ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setFilters((prev) => ({ ...prev, q: "" }));
+                      closeDetailsDrawer();
+                      setSearchMessage("已清除全文搜索。");
+                      scheduleHotspotLoad("viewport");
+                    }}
+                  >
+                    搜索: {filters.q} ×
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
+          </form>
+
+          <div className="sidebar-section current-view-section">
+            <p className="eyebrow">当前结果</p>
+            <p>
+              {currentScopeText} · {showDemoMode ? `演示 ${displayHotspots.length} 个热点` : `共 ${displayHotspots.length} 个热点`} · {markerCountText}
+            </p>
+          </div>
+
+          {workspaceNotice ? (
+            <div className="workspace-state">
+              <strong>{workspaceNotice.title}</strong>
+              <span>{workspaceNotice.body}</span>
+            </div>
+          ) : null}
+
+          <RankingList
+            items={displayRanking}
+            maxHeat={maxRankingHeat}
+            loading={loading}
+            sortMode={resultSortMode}
+            selectedRegionKey={selectedRegion?.regionKey ?? null}
+            selectedDataDate={selectedRegion?.dataDate ?? null}
+            onSortChange={setResultSortMode}
+            onLocate={locateRankingItem}
+            attitudeColor={goldsteinColor}
+            formatGoldstein={formatGoldstein}
+            themeLabel={themeLabel}
+          />
+        </aside>
+
+        <MapRenderer
+          mapRef={mapEl}
+          mapReady={mapReady}
+          mapLoadError={mapLoadError}
+          size={size}
+          dragging={dragging}
+          baseMapTransform={baseMapTransform}
+          countryPaths={countryPaths}
+          regionPaths={regionPaths}
+          mapLabels={mapLabels}
+          hotspotMarkers={hotspotMarkers}
+          hoveredMarker={hoveredMarker}
+          mapOverlayText={mapOverlayText}
+          onWheel={handleWheel}
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={handlePointerUp}
+          onZoomIn={() => zoomBy(1.45)}
+          onZoomOut={() => zoomBy(1 / 1.45)}
+          onResetView={handleResetMapView}
+          onFitResults={fitCurrentResults}
+          onHoverRegion={(markerKey) => {
+            setHoveredRegionKey((current) => (markerKey === null && current === null ? current : markerKey));
+          }}
+          onOpenRegion={openRegionHotspot}
           trendClassName={trendClassName}
-          formatGoldstein={formatGoldstein}
           themeLabel={themeLabel}
-          flagText={flagText}
+          formatGoldstein={formatGoldstein}
+          goldsteinToneLabel={goldsteinToneLabel}
+          formatHeatDelta={formatHeatDelta}
         />
-      ) : null}
-    </section>
+
+        {selectedRegion ? (
+          <DetailsDrawer
+            region={selectedRegion}
+            selected={selected}
+            rank={selectedRegionRank}
+            totalHotspots={displayHotspots.length}
+            activeTab={detailTab}
+            onTabChange={setDetailTab}
+            regionTrend={regionTrend}
+            regionTrendMessage={regionTrendMessage}
+            onOpenChannelHotspot={openChannelHotspot}
+            sourceLoading={sourceLoading}
+            sourceMessage={sourceMessage}
+            enrichmentState={selectedEnrichmentState}
+            expandedStoryId={expandedStoryId}
+            onToggleStory={(id) => setExpandedStoryId((current) => (current === id ? null : id))}
+            hotspotNeedsEnrichment={hotspotNeedsEnrichment}
+            channelColors={CHANNEL_COLORS}
+            quadClassColors={QUAD_CLASS_COLORS}
+            situationColor={situationColor}
+            trendClassName={trendClassName}
+            formatGoldstein={formatGoldstein}
+            themeLabel={themeLabel}
+            flagText={flagText}
+          />
+        ) : null}
+      </section>
+    </>
   );
 }

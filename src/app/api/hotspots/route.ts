@@ -14,6 +14,7 @@ export async function GET(request: Request) {
   const south = numberParam(url, "south");
   const east = numberParam(url, "east");
   const north = numberParam(url, "north");
+  const limit = numberParam(url, "limit");
   const sort = url.searchParams.get("sort") === "attitude" ? "attitude" : "heat";
 
   try {
@@ -21,7 +22,9 @@ export async function GET(request: Request) {
       date: url.searchParams.get("date") || undefined,
       channel: url.searchParams.get("channel") || undefined,
       region: url.searchParams.get("region") || undefined,
+      q: url.searchParams.get("q") || undefined,
       sort,
+      limit,
       bbox:
         west === undefined || south === undefined || east === undefined || north === undefined
           ? undefined

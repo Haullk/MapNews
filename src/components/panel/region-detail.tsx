@@ -1,6 +1,7 @@
 import type { CSSProperties } from "react";
 import { RegionTrendPanel } from "@/components/panel/region-trend-panel";
 import { ThemeDonutChart } from "@/components/panel/theme-donut-chart";
+import { AttitudeIndicator, attitudeColor, defaultAttitudeText } from "@/components/shared/attitude-indicator";
 import type { MapHotspot, RegionTrend } from "@/lib/hotspots";
 
 interface RegionDetailProps {
@@ -13,7 +14,6 @@ interface RegionDetailProps {
   onOpenChannelHotspot: (id: number) => void;
   channelColors: Record<string, string>;
   quadClassColors: Record<number, string>;
-  situationColor: (hotspot: MapHotspot) => string;
   trendClassName: (trendLabel: string) => string;
   formatGoldstein: (value: number | null) => string;
   themeLabel: (channel: string) => string;
@@ -93,7 +93,6 @@ export function RegionDetail({
   onOpenChannelHotspot,
   channelColors,
   quadClassColors,
-  situationColor,
   trendClassName,
   formatGoldstein,
   themeLabel,
@@ -109,7 +108,7 @@ export function RegionDetail({
         <h2>{region.regionName}</h2>
         <div className="overview-lines">
           <div>
-            <span style={{ "--situation-color": situationColor(region) } as CSSProperties}>
+            <span style={{ "--situation-color": attitudeColor(region.weightedGoldstein) } as CSSProperties}>
               <i />
               {heatLabel}
             </span>
@@ -121,10 +120,18 @@ export function RegionDetail({
           </div>
         </div>
         <div className="supporting-metrics overview-metrics">
-          <span>{region.eventCount} 个结构化信号</span>
+          <span>{region.eventCount} 个事件信号</span>
           <span>{region.sourceCount} 个来源</span>
         </div>
       </div>
+
+      <section className="detail-section attitude-section">
+        <AttitudeIndicator
+          value={region.weightedGoldstein}
+          valueText={formatGoldstein(region.weightedGoldstein)}
+          toneText={defaultAttitudeText(region.weightedGoldstein)}
+        />
+      </section>
 
       <section className="detail-section primary-section">
         <div className="section-heading">
@@ -178,7 +185,7 @@ export function RegionDetail({
           </div>
         </div>
         <p className="muted-copy">
-          GDELT 态势倾向 {formatGoldstein(region.weightedGoldstein)}，仅表示报道信号偏合作或冲突，不等同于现实世界结论。
+          态势倾向仅表示公开报道信号偏合作或冲突，不等同于现实世界结论。
         </p>
         {region.quadClassBreakdown.length ? (
           <details className="technical-breakdown">

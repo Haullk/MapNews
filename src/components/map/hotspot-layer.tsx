@@ -41,7 +41,7 @@ export function HotspotLayer({
           key={markerKey}
           role="button"
           tabIndex={0}
-          aria-label={`${hotspot.regionName} 态势热点，GDELT 态势倾向 ${goldsteinText}，${hotspot.trendLabel}，话题 ${themeLabel(hotspot.channel)}。${themeSummary}`}
+          aria-label={`${hotspot.regionName} 态势热点，态势倾向 ${goldsteinText}，${hotspot.trendLabel}，话题 ${themeLabel(hotspot.channel)}。${themeSummary}`}
           className={`hotspot-dot ${selected ? "selected" : ""} ${hovered ? "hovered" : ""} ${trendClassName(hotspot.trendLabel)}`}
           transform={`translate(${x} ${y})`}
           style={{ "--marker-color": color, "--marker-size": `${sizePx}px` } as CSSProperties}

@@ -1,19 +1,21 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { DataStatus, HotspotDetail, MapHotspot, QueryStatus } from "@/lib/hotspots";
+import type { DataStatus, HotspotFilters, MapHotspot, QueryStatus } from "@/lib/hotspots";
 
 export type LoadMode = "full" | "hotspots" | "viewport";
+export type WorkspaceFilters = Required<Pick<HotspotFilters, "date" | "channel" | "q">>;
+type QueryPurpose = "map" | "ranking";
 type HotspotsPayload = { hotspots: MapHotspot[]; status: { message: string; ok: boolean } };
 
 interface UseWorkspaceDataOptions {
   databaseReady: boolean;
   mapReady: boolean;
-  filters: { date: string; channel: string; region: string };
+  filters: WorkspaceFilters;
   initialStatus: DataStatus;
   initialHotspots: MapHotspot[];
   initialHotspotStatus: QueryStatus;
   hasInitialWorkspacePayload: boolean;
   viewportKey: string | null;
-  queryParams: (withBounds: boolean) => URLSearchParams;
+  queryParams: (withBounds: boolean, purpose?: QueryPurpose) => URLSearchParams;
 }
 
 export function useWorkspaceData({
@@ -52,7 +54,14 @@ export function useWorkspaceData({
     abortRef.current = controller;
     setLoading(true);
     try {
-      const hotspotRequest = fetch(`/api/hotspots?${queryParams(true).toString()}`, {
+      const hotspotRequest = fetch(`/api/hotspots?${queryParams(true, "map").toString()}`, {
+        cache: "no-store",
+        signal: controller.signal,
+      }).then(async (response) => ({
+        response,
+        payload: (await response.json()) as HotspotsPayload,
+      }));
+      const rankingRequest = fetch(`/api/hotspots?${queryParams(false, "ranking").toString()}`, {
         cache: "no-store",
         signal: controller.signal,
       }).then(async (response) => ({
@@ -69,18 +78,22 @@ export function useWorkspaceData({
                 signal: controller.signal,
               }).then((response) => response.json() as Promise<{ status: DataStatus }>)
           : Promise.resolve<{ status: DataStatus } | null>(null);
-      const [hotspotResult, statusPayload] = await Promise.all([
+      const [hotspotResult, rankingResult, statusPayload] = await Promise.all([
         hotspotRequest,
+        rankingRequest,
         statusRequest,
       ]);
       if (requestId !== requestIdRef.current) return;
       if (!hotspotResult.response.ok) {
         throw new Error(hotspotResult.payload.status.message);
       }
+      if (rankingResult && !rankingResult.response.ok) {
+        throw new Error(rankingResult.payload.status.message);
+      }
       const hotspotPayload = hotspotResult.payload;
       setHotspots(hotspotPayload.hotspots);
-      if (mode !== "viewport") {
-        setRanking(hotspotPayload.hotspots.slice(0, 20));
+      if (rankingResult) {
+        setRanking(rankingResult.payload.hotspots.slice(0, 20));
       }
       setMessage(hotspotPayload.status.message);
 
@@ -104,12 +117,12 @@ export function useWorkspaceData({
     loadWorkspaceRef.current = loadWorkspace;
   }, [loadWorkspace]);
 
-  const scheduleHotspotLoad = useCallback(() => {
+  const scheduleHotspotLoad = useCallback((requestedMode?: LoadMode) => {
     if (debounceRef.current) {
       clearTimeout(debounceRef.current);
     }
     debounceRef.current = setTimeout(() => {
-      const mode: LoadMode = Date.now() < preserveRankingUntilRef.current ? "viewport" : "hotspots";
+      const mode: LoadMode = requestedMode ?? (Date.now() < preserveRankingUntilRef.current ? "viewport" : "hotspots");
       loadWorkspaceRef.current(mode);
     }, 350);
   }, []);
@@ -130,7 +143,7 @@ export function useWorkspaceData({
     if (!databaseReady || !mapReady || !initialLoadRef.current) return;
     if (!viewportKey || viewportKey === previousViewportRef.current) return;
     previousViewportRef.current = viewportKey;
-    scheduleHotspotLoad();
+    scheduleHotspotLoad("viewport");
   }, [databaseReady, mapReady, scheduleHotspotLoad, viewportKey]);
 
   useEffect(() => {

@@ -98,7 +98,6 @@ export function DetailsDrawer({
           onOpenChannelHotspot={onOpenChannelHotspot}
           channelColors={channelColors}
           quadClassColors={quadClassColors}
-          situationColor={situationColor}
           trendClassName={trendClassName}
           formatGoldstein={formatGoldstein}
           themeLabel={themeLabel}
