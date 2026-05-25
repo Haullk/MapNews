@@ -25,8 +25,8 @@ function heatLevelLabel(rank: number | null, heatScore: number) {
     if (rank <= 10) return "高热度";
     if (rank <= 30) return "活跃热点";
   }
-  if (heatScore >= 30000) return "高热度";
-  if (heatScore >= 10000) return "活跃热点";
+  if (heatScore >= 10) return "高热度";
+  if (heatScore >= 6) return "活跃热点";
   return "普通热点";
 }
 
@@ -37,9 +37,10 @@ function rankText(rank: number | null, totalHotspots: number) {
 
 function trendText(region: MapHotspot) {
   if (region.heatDelta === null) return region.trendLabel;
-  if (region.heatDelta > 0) return "较昨日升温";
-  if (region.heatDelta < 0) return "较昨日回落";
-  return "较昨日持平";
+  if (region.trendLabel === "显著升温") return "相对基线显著升温";
+  if (region.heatDelta > 0) return "相对基线升温";
+  if (region.heatDelta < 0) return "相对基线回落";
+  return "相对基线持平";
 }
 
 function actorLabel(name: string) {
@@ -136,7 +137,7 @@ export function RegionDetail({
       <section className="detail-section primary-section">
         <div className="section-heading">
           <p className="eyebrow">话题占比</p>
-          <span>按热度计算</span>
+          <span>按报道热度计算</span>
         </div>
         <ThemeDonutChart
           items={region.channelBreakdown}

@@ -1,7 +1,8 @@
+import math
 from datetime import date
 
 from worker.channels import channel_for_event_code
-from worker.processing import aggregate_hotspots, classify_trend, clean_event_from_raw, clean_mention_from_raw
+from worker.processing import aggregate_hotspots, baseline_metrics, clean_event_from_raw, clean_mention_from_raw
 
 
 def event_row(
@@ -11,6 +12,7 @@ def event_row(
     lon: str = "116.3",
     quad_class: str = "4",
     goldstein: str = "-10",
+    num_mentions: str = "3",
 ) -> list[str]:
     row = [""] * 61
     row[0] = event_id
@@ -22,7 +24,7 @@ def event_row(
     row[28] = event_code[:2]
     row[29] = quad_class
     row[30] = goldstein
-    row[31] = "3"
+    row[31] = num_mentions
     row[32] = "2"
     row[33] = "4"
     row[51] = "4"
@@ -81,7 +83,28 @@ def test_hotspot_aggregation_groups_by_date_region_and_channel() -> None:
     assert len(hotspots) == 1
     assert hotspots[0].data_date == date(2026, 5, 17)
     assert hotspots[0].event_count == 2
-    assert hotspots[0].mention_count >= 4
+    assert hotspots[0].mention_count == 6
+
+
+def test_hotspot_aggregation_filters_low_effective_mentions() -> None:
+    event = clean_event_from_raw(event_row(event_id="100", num_mentions="1"))
+
+    assert event is not None
+    assert aggregate_hotspots([event], {}) == []
+
+
+def test_hotspot_heat_score_uses_log_evidence() -> None:
+    event_a = clean_event_from_raw(event_row(event_id="100", event_code="190"))
+    event_b = clean_event_from_raw(event_row(event_id="101", event_code="193"))
+    mention = clean_mention_from_raw("raw-1", mention_row(event_id="100"))
+
+    assert event_a is not None
+    assert event_b is not None
+    assert mention is not None
+    hotspot = aggregate_hotspots([event_a, event_b], {100: [mention]})[0]
+
+    expected = math.log1p(2) + math.log1p(6) + math.log1p(2)
+    assert math.isclose(hotspot.heat_score, expected)
 
 
 def test_hotspot_aggregation_derives_situation_metrics() -> None:
@@ -98,13 +121,23 @@ def test_hotspot_aggregation_derives_situation_metrics() -> None:
     assert hotspot.quad_class_breakdown[0]["label"] == "实质冲突"
     assert hotspot.weighted_goldstein is not None
     assert hotspot.weighted_goldstein < 0
+    assert hotspot.goldstein_weight == 6
     assert hotspot.goldstein_min == -10
     assert hotspot.goldstein_max == -5
     assert hotspot.top_actors[0]["name"] == "ACTOR A"
 
 
-def test_classify_trend_handles_missing_and_thresholds() -> None:
-    assert classify_trend(100, None) == (None, "暂无对比")
-    assert classify_trend(130, 100) == (30, "升温")
-    assert classify_trend(70, 100) == (-30, "冷却")
-    assert classify_trend(105, 100) == (5, "活跃")
+def test_baseline_metrics_handles_insufficient_history_and_zscore_labels() -> None:
+    assert baseline_metrics(10, [9, 10]) == (None, None, 2, None, None, "基线不足")
+
+    mean, stddev, days, zscore, delta, label = baseline_metrics(10.5, [10, 10, 10])
+    assert mean == 10
+    assert stddev == 0
+    assert days == 3
+    assert zscore == 2
+    assert delta == 0.5
+    assert label == "显著升温"
+
+    assert baseline_metrics(10.3, [10, 10, 10])[-1] == "升温"
+    assert baseline_metrics(10, [10, 10, 10])[-1] == "平稳"
+    assert baseline_metrics(9.7, [10, 10, 10])[-1] == "冷却"

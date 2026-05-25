@@ -28,9 +28,11 @@ import { MapRenderer } from "@/components/map/map-renderer";
 import { DailyBriefCard } from "@/components/panel/daily-brief-card";
 import { DetailsDrawer, type DetailTab } from "@/components/panel/details-drawer";
 import { RankingList, type ResultSortMode } from "@/components/panel/ranking-list";
+import { buildGoldsteinColorScale, goldsteinColor } from "@/components/shared/attitude-indicator";
 import type {
   DataStatus,
   DailyBrief,
+  HotspotChannelBreakdown,
   HotspotDetail,
   MapHotspot,
   QueryStatus,
@@ -93,10 +95,14 @@ const THEME_LABELS: Record<string, string> = {
   社会: "社会民生",
 };
 
-const GOLDSTEIN_NEGATIVE = "#dc2626";
-const GOLDSTEIN_NEUTRAL = "#f8fafc";
-const GOLDSTEIN_POSITIVE = "#2563eb";
-const GOLDSTEIN_MISSING = "#94a3b8";
+function demoChannel(item: Omit<HotspotChannelBreakdown, "baselineDays" | "relativeHeatZScore" | "scoreVersion">): HotspotChannelBreakdown {
+  return {
+    ...item,
+    baselineDays: 7,
+    relativeHeatZScore: 1.2,
+    scoreVersion: "demo",
+  };
+}
 
 const DEMO_HOTSPOTS: MapHotspot[] = [
   {
@@ -109,9 +115,9 @@ const DEMO_HOTSPOTS: MapHotspot[] = [
     primaryHotspotId: -1,
     channelCount: 3,
     channelBreakdown: [
-      { hotspotId: -1, channel: "国际", heatScore: 620, eventCount: 32, mentionCount: 96, sourceCount: 28, summary: "演示国际关系热点。" },
-      { hotspotId: -2, channel: "政治", heatScore: 360, eventCount: 18, mentionCount: 44, sourceCount: 16, summary: "演示政治治理热点。" },
-      { hotspotId: -3, channel: "经济", heatScore: 210, eventCount: 11, mentionCount: 22, sourceCount: 9, summary: "演示经济产业热点。" },
+      demoChannel({ hotspotId: -1, channel: "国际", heatScore: 620, eventCount: 32, mentionCount: 96, sourceCount: 28, summary: "演示国际关系热点。" }),
+      demoChannel({ hotspotId: -2, channel: "政治", heatScore: 360, eventCount: 18, mentionCount: 44, sourceCount: 16, summary: "演示政治治理热点。" }),
+      demoChannel({ hotspotId: -3, channel: "经济", heatScore: 210, eventCount: 11, mentionCount: 22, sourceCount: 9, summary: "演示经济产业热点。" }),
     ],
     heatScore: 1190,
     eventCount: 61,
@@ -131,6 +137,11 @@ const DEMO_HOTSPOTS: MapHotspot[] = [
     goldsteinMax: 6.5,
     heatDelta: 120,
     trendLabel: "升温",
+    baselineMean: 1070,
+    baselineStddev: 100,
+    baselineDays: 7,
+    relativeHeatZScore: 1.2,
+    scoreVersion: "demo",
     topActors: [
       { name: "CHINA", count: 26 },
       { name: "UNITED STATES", count: 14 },
@@ -147,15 +158,15 @@ const DEMO_HOTSPOTS: MapHotspot[] = [
     primaryHotspotId: -4,
     channelCount: 2,
     channelBreakdown: [
-      { hotspotId: -4, channel: "冲突", heatScore: 780, eventCount: 40, mentionCount: 130, sourceCount: 35, summary: "演示冲突安全热点。" },
-      { hotspotId: -5, channel: "国际", heatScore: 420, eventCount: 20, mentionCount: 70, sourceCount: 18, summary: "演示国际关系热点。" },
+      demoChannel({ hotspotId: -4, channel: "冲突", heatScore: 780, eventCount: 40, mentionCount: 130, sourceCount: 35, summary: "演示冲突安全热点。" }),
+      demoChannel({ hotspotId: -5, channel: "国际", heatScore: 420, eventCount: 20, mentionCount: 70, sourceCount: 18, summary: "演示国际关系热点。" }),
     ],
     heatScore: 1200,
     eventCount: 60,
     mentionCount: 200,
     sourceCount: 53,
     dataDate: "演示数据",
-    summary: "演示数据：Tehran 显示为高热地区，点的大小代表综合热度。",
+    summary: "演示数据：Tehran 显示为高热地区，点的大小代表报道热度。",
     dominantQuadClass: 4,
     quadClassLabel: "实质冲突",
     quadClassBreakdown: [
@@ -166,7 +177,12 @@ const DEMO_HOTSPOTS: MapHotspot[] = [
     goldsteinMin: -8,
     goldsteinMax: 1.5,
     heatDelta: 80,
-    trendLabel: "活跃",
+    trendLabel: "平稳",
+    baselineMean: 1120,
+    baselineStddev: 90,
+    baselineDays: 7,
+    relativeHeatZScore: 0.9,
+    scoreVersion: "demo",
     topActors: [
       { name: "IRAN", count: 31 },
       { name: "TEHRAN", count: 12 },
@@ -182,8 +198,8 @@ const DEMO_HOTSPOTS: MapHotspot[] = [
     primaryHotspotId: -6,
     channelCount: 2,
     channelBreakdown: [
-      { hotspotId: -6, channel: "政治", heatScore: 720, eventCount: 36, mentionCount: 88, sourceCount: 30, summary: "演示政治治理热点。" },
-      { hotspotId: -7, channel: "社会", heatScore: 180, eventCount: 10, mentionCount: 20, sourceCount: 8, summary: "演示社会民生热点。" },
+      demoChannel({ hotspotId: -6, channel: "政治", heatScore: 720, eventCount: 36, mentionCount: 88, sourceCount: 30, summary: "演示政治治理热点。" }),
+      demoChannel({ hotspotId: -7, channel: "社会", heatScore: 180, eventCount: 10, mentionCount: 20, sourceCount: 8, summary: "演示社会民生热点。" }),
     ],
     heatScore: 900,
     eventCount: 46,
@@ -202,6 +218,11 @@ const DEMO_HOTSPOTS: MapHotspot[] = [
     goldsteinMax: 4,
     heatDelta: -45,
     trendLabel: "冷却",
+    baselineMean: 945,
+    baselineStddev: 32,
+    baselineDays: 7,
+    relativeHeatZScore: -1.4,
+    scoreVersion: "demo",
     topActors: [
       { name: "UNITED STATES", count: 22 },
       { name: "WASHINGTON", count: 11 },
@@ -217,8 +238,8 @@ const DEMO_HOTSPOTS: MapHotspot[] = [
     primaryHotspotId: -8,
     channelCount: 2,
     channelBreakdown: [
-      { hotspotId: -8, channel: "经济", heatScore: 520, eventCount: 24, mentionCount: 55, sourceCount: 22, summary: "演示经济产业热点。" },
-      { hotspotId: -9, channel: "国际", heatScore: 260, eventCount: 12, mentionCount: 28, sourceCount: 11, summary: "演示国际关系热点。" },
+      demoChannel({ hotspotId: -8, channel: "经济", heatScore: 520, eventCount: 24, mentionCount: 55, sourceCount: 22, summary: "演示经济产业热点。" }),
+      demoChannel({ hotspotId: -9, channel: "国际", heatScore: 260, eventCount: 12, mentionCount: 28, sourceCount: 11, summary: "演示国际关系热点。" }),
     ],
     heatScore: 780,
     eventCount: 36,
@@ -237,6 +258,11 @@ const DEMO_HOTSPOTS: MapHotspot[] = [
     goldsteinMax: 7,
     heatDelta: 30,
     trendLabel: "升温",
+    baselineMean: 750,
+    baselineStddev: 25,
+    baselineDays: 7,
+    relativeHeatZScore: 1.2,
+    scoreVersion: "demo",
     topActors: [
       { name: "INDIA", count: 20 },
       { name: "NEW DELHI", count: 8 },
@@ -314,30 +340,6 @@ function situationColor(hotspot: MapHotspot) {
   return hotspot.dominantQuadClass ? (QUAD_CLASS_COLORS[hotspot.dominantQuadClass] ?? "#64748b") : "#64748b";
 }
 
-function hexToRgb(color: string) {
-  const normalized = color.replace("#", "");
-  return {
-    r: Number.parseInt(normalized.slice(0, 2), 16),
-    g: Number.parseInt(normalized.slice(2, 4), 16),
-    b: Number.parseInt(normalized.slice(4, 6), 16),
-  };
-}
-
-function mixHexColor(fromColor: string, toColor: string, ratio: number) {
-  const from = hexToRgb(fromColor);
-  const to = hexToRgb(toColor);
-  const amount = clamp(ratio, 0, 1);
-  const channel = (fromValue: number, toValue: number) => Math.round(fromValue + (toValue - fromValue) * amount);
-  return `rgb(${channel(from.r, to.r)}, ${channel(from.g, to.g)}, ${channel(from.b, to.b)})`;
-}
-
-function goldsteinColor(value: number | null) {
-  if (value === null) return GOLDSTEIN_MISSING;
-  const normalized = clamp(value, -10, 10);
-  if (normalized < 0) return mixHexColor(GOLDSTEIN_NEGATIVE, GOLDSTEIN_NEUTRAL, (normalized + 10) / 10);
-  return mixHexColor(GOLDSTEIN_NEUTRAL, GOLDSTEIN_POSITIVE, normalized / 10);
-}
-
 function goldsteinToneLabel(value: number | null) {
   if (value === null) return "暂无倾向";
   if (value <= -4) return "冲突倾向强";
@@ -348,21 +350,22 @@ function goldsteinToneLabel(value: number | null) {
 }
 
 function trendClassName(trendLabel: string) {
-  if (trendLabel === "升温") return "warming";
-  if (trendLabel === "活跃") return "active";
+  if (trendLabel === "显著升温" || trendLabel === "升温") return "warming";
+  if (trendLabel === "平稳" || trendLabel === "活跃") return "active";
   if (trendLabel === "冷却") return "cooling";
   return "no-comparison";
 }
 
 function trendGlowFor(trendLabel: string, ringRadius: number) {
+  if (trendLabel === "显著升温") return { radius: ringRadius + 30, opacity: 0.42 };
   if (trendLabel === "升温") return { radius: ringRadius + 24, opacity: 0.34 };
-  if (trendLabel === "活跃") return { radius: ringRadius + 14, opacity: 0.16 };
+  if (trendLabel === "平稳" || trendLabel === "活跃") return { radius: ringRadius + 14, opacity: 0.16 };
   if (trendLabel === "冷却") return { radius: ringRadius + 10, opacity: 0.08 };
   return { radius: ringRadius + 8, opacity: 0 };
 }
 
 function formatHeatDelta(value: number | null) {
-  if (value === null) return "暂无对比";
+  if (value === null) return "基线不足";
   const sign = value > 0 ? "+" : "";
   return `${sign}${value.toFixed(1)}`;
 }
@@ -773,6 +776,10 @@ export function NewsMap({
     () => sortResultHotspots(rawDisplayRanking, resultSortMode),
     [rawDisplayRanking, resultSortMode],
   );
+  const goldsteinScale = useMemo(
+    () => buildGoldsteinColorScale(displayHotspots.map((hotspot) => hotspot.weightedGoldstein)),
+    [displayHotspots],
+  );
   const candidateHotspots = useMemo(() => {
     const limit = showAllMapMarkers ? displayHotspots.length : hotspotCandidateLimitForZoom(mapView.k, displayHotspots.length);
     const candidates = displayHotspots.slice(0, limit);
@@ -868,7 +875,7 @@ export function NewsMap({
         const selected =
           hotspot.regionKey === selectedRegion?.regionKey && hotspot.dataDate === selectedRegion.dataDate;
         const hovered = markerKey === hoveredRegionKey;
-        const color = goldsteinColor(hotspot.weightedGoldstein);
+        const color = goldsteinColor(hotspot.weightedGoldstein, goldsteinScale);
         const heatIntensity = heatIntensityFor(hotspot.heatScore, hotspotHeatScale.low, hotspotHeatScale.high);
         const sizePx = markerSizeForHeat(hotspot.heatScore, hotspotHeatScale.low, hotspotHeatScale.high);
         const ringRadius = sizePx / 2 + 5;
@@ -897,7 +904,7 @@ export function NewsMap({
       })
       .filter((item): item is NonNullable<typeof item> => item !== null);
     return showAllMapMarkers ? orderVisibleHotspotMarkers(candidateMarkers) : declutterHotspotMarkers(candidateMarkers, mapView.k);
-  }, [candidateHotspots, hotspotHeatScale, hoveredRegionKey, mapView, projection, selectedRegion, showAllMapMarkers, size]);
+  }, [candidateHotspots, goldsteinScale, hotspotHeatScale, hoveredRegionKey, mapView, projection, selectedRegion, showAllMapMarkers, size]);
 
   const hoveredMarker = useMemo(
     () => hotspotMarkers.find((marker) => marker.markerKey === hoveredRegionKey) ?? null,
@@ -1005,6 +1012,7 @@ export function NewsMap({
       date: selectedRegion.dataDate,
       days: "90",
     });
+    if (selectedRegion.scoreVersion) params.set("scoreVersion", selectedRegion.scoreVersion);
     void fetch(`/api/region-trends?${params.toString()}`, {
       cache: "no-store",
       signal: controller.signal,
@@ -1537,7 +1545,7 @@ export function NewsMap({
             selectedDataDate={selectedRegion?.dataDate ?? null}
             onSortChange={setResultSortMode}
             onLocate={locateRankingItem}
-            attitudeColor={goldsteinColor}
+            attitudeColor={(value) => goldsteinColor(value, goldsteinScale)}
             formatGoldstein={formatGoldstein}
             themeLabel={themeLabel}
           />
@@ -1572,6 +1580,7 @@ export function NewsMap({
           themeLabel={themeLabel}
           formatGoldstein={formatGoldstein}
           goldsteinToneLabel={goldsteinToneLabel}
+          goldsteinScale={goldsteinScale}
           formatHeatDelta={formatHeatDelta}
         />
 

@@ -6,7 +6,11 @@ import {
   useState,
 } from "react";
 import type { MapHotspot } from "@/lib/hotspots";
-import { AttitudeIndicator } from "@/components/shared/attitude-indicator";
+import {
+  AttitudeIndicator,
+  goldsteinLegendGradient,
+  type GoldsteinColorScale,
+} from "@/components/shared/attitude-indicator";
 import { HotspotLayer, type HotspotMarkerView } from "./hotspot-layer";
 
 interface MapSize {
@@ -54,6 +58,7 @@ interface MapRendererProps {
   themeLabel: (channel: string) => string;
   formatGoldstein: (value: number | null) => string;
   goldsteinToneLabel: (value: number | null) => string;
+  goldsteinScale: GoldsteinColorScale;
   formatHeatDelta: (value: number | null) => string;
 }
 
@@ -94,9 +99,13 @@ export function MapRenderer({
   themeLabel,
   formatGoldstein,
   goldsteinToneLabel,
+  goldsteinScale,
   formatHeatDelta,
 }: MapRendererProps) {
   const [legendOpen, setLegendOpen] = useState(true);
+  const legendRangeText = goldsteinScale.isDynamic
+    ? `当前色阶约 ${formatGoldstein(goldsteinScale.min)} 到 ${formatGoldstein(goldsteinScale.max)}`
+    : `固定色阶 ${formatGoldstein(goldsteinScale.min)} 到 ${formatGoldstein(goldsteinScale.max)}`;
 
   return (
     <div className="map-stage" ref={mapRef}>
@@ -152,7 +161,7 @@ export function MapRenderer({
           <strong>{hoveredMarker.hotspot.regionName}</strong>
           <div className="hover-metric-grid">
             <span>
-              <em>综合热度</em>
+              <em>报道热度</em>
               <b>{formatCompactNumber(hoveredMarker.hotspot.heatScore)}</b>
             </span>
             <span>
@@ -164,6 +173,7 @@ export function MapRenderer({
             value={hoveredMarker.hotspot.weightedGoldstein}
             valueText={formatGoldstein(hoveredMarker.hotspot.weightedGoldstein)}
             toneText={goldsteinToneLabel(hoveredMarker.hotspot.weightedGoldstein)}
+            colorScale={goldsteinScale}
             compact
           />
           <div className="hover-footer-row">
@@ -171,7 +181,7 @@ export function MapRenderer({
             <span>{hoveredMarker.hotspot.trendLabel}</span>
             <span>{hoveredMarker.hotspot.eventCount} 个事件信号</span>
           </div>
-          <small>较昨日 {formatHeatDelta(hoveredMarker.hotspot.heatDelta)} · 点击查看热点详情</small>
+          <small>相对近期基线 {formatHeatDelta(hoveredMarker.hotspot.heatDelta)} · 点击查看热点详情</small>
         </div>
       ) : null}
       <div className="map-controls" aria-label="地图控制">
@@ -191,13 +201,13 @@ export function MapRenderer({
         </button>
         {legendOpen ? (
           <>
-            <i />
+            <i style={{ "--goldstein-gradient": goldsteinLegendGradient(goldsteinScale) } as CSSProperties} />
             <div>
               <b>冲突倾向</b>
               <b>中性混合</b>
               <b>合作倾向</b>
             </div>
-            <small>基于公开报道信号聚合，不等同于现实世界结论</small>
+            <small>{legendRangeText} · 基于公开报道信号聚合</small>
           </>
         ) : null}
       </div>

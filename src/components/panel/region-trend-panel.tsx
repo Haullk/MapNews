@@ -76,6 +76,10 @@ export function RegionTrendPanel({ trend, message }: { trend: RegionTrend | null
   const heatPath = trendLinePath(trend.points, (point) => point.heatScore, 0, maxHeat);
   const goldsteinPath = trendLinePath(trend.points, (point) => point.weightedGoldstein, -10, 10);
   const latestPoint = [...trend.points].reverse().find((point) => !point.isMissing);
+  const hiddenVersionNotice =
+    trend.mixedScoreVersions && trend.hiddenVersionDays > 0
+      ? `已隐藏 ${trend.hiddenVersionDays} 天不同评分口径的数据，保持趋势可比。`
+      : null;
 
   return (
     <div className="trend-panel">
@@ -85,10 +89,10 @@ export function RegionTrendPanel({ trend, message }: { trend: RegionTrend | null
       </div>
       <div className="trend-chart">
         <div className="trend-chart-title">
-          <span>热度趋势</span>
+          <span>报道热度趋势</span>
           <strong>{latestPoint ? latestPoint.heatScore.toFixed(1) : "暂无"}</strong>
         </div>
-        <svg viewBox="0 0 300 76" role="img" aria-label={`${trend.regionName} 热度趋势`}>
+        <svg viewBox="0 0 300 76" role="img" aria-label={`${trend.regionName} 报道热度趋势`}>
           <line className="trend-axis" x1="8" y1="66" x2="292" y2="66" />
           <path className="trend-line heat" d={heatPath} />
         </svg>
@@ -119,8 +123,9 @@ export function RegionTrendPanel({ trend, message }: { trend: RegionTrend | null
       </div>
       <div className="trend-meta">
         <span>{trend.startDate ?? "暂无"} 至 {trend.endDate ?? "暂无"}</span>
-        <span>缺失日期按 0 热度展示</span>
+        <span>缺失日期按 0 报道热度展示</span>
       </div>
+      {hiddenVersionNotice ? <div className="trend-notice">{hiddenVersionNotice}</div> : null}
     </div>
   );
 }

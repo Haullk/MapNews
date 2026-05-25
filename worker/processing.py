@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
@@ -22,6 +23,12 @@ QUAD_CLASS_LABELS = {
     3: "口头冲突",
     4: "实质冲突",
 }
+
+HOTSPOT_MIN_EFFECTIVE_MENTIONS = 2
+BASELINE_LOOKBACK_DAYS = 7
+MIN_BASELINE_DAYS = 3
+MIN_BASELINE_STDDEV = 0.25
+SCORE_VERSION = "log-evidence-v2"
 
 
 @dataclass(frozen=True)
@@ -91,12 +98,16 @@ class HotspotAggregate:
     goldstein_values: list[float] = field(default_factory=list)
     actor_counts: Counter[str] = field(default_factory=Counter)
     heat_delta: float | None = None
-    trend_label: str = "暂无对比"
+    trend_label: str = "基线不足"
+    baseline_mean: float | None = None
+    baseline_stddev: float | None = None
+    baseline_days: int = 0
+    relative_heat_zscore: float | None = None
 
     def add_event(self, event: CleanEvent, mentions: list[CleanMention]) -> None:
-        event_weight = max(event.num_mentions, len(mentions), 1)
+        event_weight = max(effective_mentions(event, mentions), 1)
         self.event_ids.add(event.global_event_id)
-        self.mention_count += max(event.num_mentions, len(mentions))
+        self.mention_count += effective_mentions(event, mentions)
         self.article_count += event.num_articles
         self.lat_sum += event.lat
         self.lon_sum += event.lon
@@ -134,11 +145,9 @@ class HotspotAggregate:
     @property
     def heat_score(self) -> float:
         return (
-            self.event_count * 10
-            + self.mention_count * 1.5
-            + len(self.source_urls) * 2
-            + len(self.source_domains) * 3
-            + self.article_count * 0.8
+            math.log1p(self.event_count)
+            + math.log1p(self.mention_count)
+            + math.log1p(len(self.source_domains))
         )
 
     @property
@@ -262,12 +271,19 @@ def clean_mention_from_raw(raw_id: str, row: list[str]) -> CleanMention | None:
     )
 
 
+def effective_mentions(event: CleanEvent, mentions: list[CleanMention]) -> int:
+    return max(event.num_mentions, len(mentions))
+
+
 def aggregate_hotspots(
     events: list[CleanEvent],
     mentions_by_event: dict[int, list[CleanMention]],
 ) -> list[HotspotAggregate]:
     grouped: dict[tuple[date, str, str], HotspotAggregate] = {}
     for event in events:
+        mentions = mentions_by_event.get(event.global_event_id, [])
+        if effective_mentions(event, mentions) < HOTSPOT_MIN_EFFECTIVE_MENTIONS:
+            continue
         key = (event.event_date, event.region_key, event.channel)
         hotspot = grouped.setdefault(
             key,
@@ -279,37 +295,59 @@ def aggregate_hotspots(
                 channel=event.channel,
             ),
         )
-        hotspot.add_event(event, mentions_by_event.get(event.global_event_id, []))
+        hotspot.add_event(event, mentions)
     return sorted(grouped.values(), key=lambda item: item.heat_score, reverse=True)
 
 
-def classify_trend(current_heat: float, previous_heat: float | None) -> tuple[float | None, str]:
-    if previous_heat is None:
-        return None, "暂无对比"
-    delta = current_heat - previous_heat
-    baseline = max(previous_heat, 1)
-    if delta >= max(10, baseline * 0.15):
-        return delta, "升温"
-    if delta <= -max(10, baseline * 0.15):
-        return delta, "冷却"
-    return delta, "活跃"
+def classify_trend_from_zscore(relative_heat_zscore: float | None, baseline_days: int) -> str:
+    if relative_heat_zscore is None or baseline_days < MIN_BASELINE_DAYS:
+        return "基线不足"
+    if relative_heat_zscore >= 2:
+        return "显著升温"
+    if relative_heat_zscore >= 1:
+        return "升温"
+    if relative_heat_zscore <= -1:
+        return "冷却"
+    return "平稳"
+
+
+def baseline_metrics(current_heat: float, baseline_values: list[float]) -> tuple[float | None, float | None, int, float | None, float | None, str]:
+    baseline_days = len(baseline_values)
+    if baseline_days < MIN_BASELINE_DAYS:
+        return None, None, baseline_days, None, None, "基线不足"
+    baseline_mean = sum(baseline_values) / baseline_days
+    variance = sum((value - baseline_mean) ** 2 for value in baseline_values) / baseline_days
+    baseline_stddev = math.sqrt(variance)
+    heat_delta = current_heat - baseline_mean
+    relative_heat_zscore = heat_delta / max(baseline_stddev, MIN_BASELINE_STDDEV)
+    return (
+        baseline_mean,
+        baseline_stddev,
+        baseline_days,
+        relative_heat_zscore,
+        heat_delta,
+        classify_trend_from_zscore(relative_heat_zscore, baseline_days),
+    )
 
 
 def apply_hotspot_trends(
     hotspots: list[HotspotAggregate],
-    previous_heat_by_key: dict[tuple[str, str], float],
+    baseline_heat_by_key: dict[tuple[str, str], list[float]],
 ) -> None:
     for hotspot in hotspots:
-        delta, label = classify_trend(
+        baseline_mean, baseline_stddev, baseline_days, zscore, delta, label = baseline_metrics(
             hotspot.heat_score,
-            previous_heat_by_key.get((hotspot.region_key, hotspot.channel)),
+            baseline_heat_by_key.get((hotspot.region_key, hotspot.channel), []),
         )
+        hotspot.baseline_mean = baseline_mean
+        hotspot.baseline_stddev = baseline_stddev
+        hotspot.baseline_days = baseline_days
+        hotspot.relative_heat_zscore = zscore
         hotspot.heat_delta = delta
         hotspot.trend_label = label
 
 
 def sync_region_daily_metrics(conn: Connection, day: date) -> int:
-    previous_day = day - timedelta(days=1)
     with conn.cursor() as cur:
         cur.execute("delete from map_region_daily_metrics where data_date = %s", (day,))
         cur.execute(
@@ -391,6 +429,16 @@ def sync_region_daily_metrics(conn: Connection, day: date) -> int:
               where rank <= 8
               group by data_date, region_key
             ),
+            weighted_source as (
+              select
+                *,
+                case
+                  when goldstein_weight > 0 then goldstein_weight
+                  when score_version = 'legacy-v1' and weighted_goldstein is not null then greatest(event_count, 1)
+                  else 0
+                end as effective_goldstein_weight
+              from filtered
+            ),
             grouped as (
               select
                 data_date,
@@ -406,10 +454,23 @@ def sync_region_daily_metrics(conn: Connection, day: date) -> int:
                 sum(article_count) as article_count,
                 sum(source_count) as source_count,
                 sum(source_domain_count) as source_domain_count,
-                sum(weighted_goldstein * greatest(event_count, 1))
-                  / nullif(sum(greatest(event_count, 1)) filter (where weighted_goldstein is not null), 0) as weighted_goldstein,
+                sum(effective_goldstein_weight) as goldstein_weight,
+                sum(weighted_goldstein * effective_goldstein_weight)
+                  / nullif(sum(effective_goldstein_weight) filter (where weighted_goldstein is not null), 0) as weighted_goldstein,
                 min(goldstein_min) as goldstein_min,
                 max(goldstein_max) as goldstein_max,
+                case
+                  when count(*) filter (where baseline_days >= 3 and baseline_mean is not null) = count(*)
+                  then sum(baseline_mean)
+                  else null
+                end as baseline_mean,
+                case
+                  when count(*) filter (where baseline_days >= 3 and baseline_stddev is not null) = count(*)
+                  then sqrt(sum(power(greatest(baseline_stddev, 0.25), 2)))
+                  else null
+                end as baseline_stddev,
+                coalesce(min(baseline_days), 0) as baseline_days,
+                (array_agg(score_version order by heat_score desc, event_count desc, id asc))[1] as score_version,
                 count(*) as channel_count,
                 jsonb_agg(
                   jsonb_build_object(
@@ -419,19 +480,16 @@ def sync_region_daily_metrics(conn: Connection, day: date) -> int:
                     'eventCount', event_count,
                     'mentionCount', mention_count,
                     'sourceCount', source_count,
-                    'summary', summary
+                    'summary', summary,
+                    'baselineDays', baseline_days,
+                    'relativeHeatZScore', relative_heat_zscore,
+                    'scoreVersion', score_version
                   )
                   order by heat_score desc, event_count desc, id asc
                 ) as channel_breakdown,
                 max(data_updated_at) as data_updated_at
-              from filtered
+              from weighted_source
               group by data_date, region_key
-            ),
-            previous_grouped as (
-              select region_key, sum(heat_score) as heat_score
-              from map_hotspots
-              where data_date = %s
-              group by region_key
             ),
             final_rows as (
               select
@@ -439,23 +497,31 @@ def sync_region_daily_metrics(conn: Connection, day: date) -> int:
                 qs.dominant_quad_class,
                 coalesce(qs.quad_class_breakdown, '[]'::jsonb) as quad_class_breakdown,
                 coalesce(actor_summary.top_actors, '[]'::jsonb) as top_actors,
-                case when p.heat_score is null then null else g.heat_score - p.heat_score end as heat_delta,
                 case
-                  when p.heat_score is null then '暂无对比'
-                  when g.heat_score - p.heat_score >= greatest(10, p.heat_score * 0.15) then '升温'
-                  when g.heat_score - p.heat_score <= -greatest(10, p.heat_score * 0.15) then '冷却'
-                  else '活跃'
+                  when g.baseline_days < 3 or g.baseline_mean is null or g.baseline_stddev is null then null
+                  else g.heat_score - g.baseline_mean
+                end as heat_delta,
+                case
+                  when g.baseline_days < 3 or g.baseline_mean is null or g.baseline_stddev is null then null
+                  else (g.heat_score - g.baseline_mean) / greatest(g.baseline_stddev, 0.25)
+                end as relative_heat_zscore,
+                case
+                  when g.baseline_days < 3 or g.baseline_mean is null or g.baseline_stddev is null then '基线不足'
+                  when (g.heat_score - g.baseline_mean) / greatest(g.baseline_stddev, 0.25) >= 2 then '显著升温'
+                  when (g.heat_score - g.baseline_mean) / greatest(g.baseline_stddev, 0.25) >= 1 then '升温'
+                  when (g.heat_score - g.baseline_mean) / greatest(g.baseline_stddev, 0.25) <= -1 then '冷却'
+                  else '平稳'
                 end as trend_label
               from grouped g
               left join quad_summary qs using (data_date, region_key)
               left join actor_summary using (data_date, region_key)
-              left join previous_grouped p using (region_key)
             )
             insert into map_region_daily_metrics (
               data_date, region_key, region_name, country_code, centroid_lat, centroid_long, geom,
               primary_channel, channel_count, channel_breakdown, heat_score, heat_delta, trend_label,
               event_count, mention_count, article_count, source_count, source_domain_count,
-              weighted_goldstein, goldstein_min, goldstein_max, dominant_quad_class,
+              weighted_goldstein, goldstein_min, goldstein_max, goldstein_weight, baseline_mean,
+              baseline_stddev, baseline_days, relative_heat_zscore, score_version, dominant_quad_class,
               quad_class_breakdown, top_actors, data_updated_at
             )
             select
@@ -463,7 +529,8 @@ def sync_region_daily_metrics(conn: Connection, day: date) -> int:
               ST_SetSRID(ST_MakePoint(centroid_long, centroid_lat), 4326),
               primary_channel, channel_count, channel_breakdown, heat_score, heat_delta, trend_label,
               event_count, mention_count, article_count, source_count, source_domain_count,
-              weighted_goldstein, goldstein_min, goldstein_max, dominant_quad_class,
+              weighted_goldstein, goldstein_min, goldstein_max, goldstein_weight, baseline_mean,
+              baseline_stddev, baseline_days, relative_heat_zscore, score_version, dominant_quad_class,
               quad_class_breakdown, top_actors, data_updated_at
             from final_rows
             on conflict (data_date, region_key) do update set
@@ -486,12 +553,18 @@ def sync_region_daily_metrics(conn: Connection, day: date) -> int:
               weighted_goldstein = excluded.weighted_goldstein,
               goldstein_min = excluded.goldstein_min,
               goldstein_max = excluded.goldstein_max,
+              goldstein_weight = excluded.goldstein_weight,
+              baseline_mean = excluded.baseline_mean,
+              baseline_stddev = excluded.baseline_stddev,
+              baseline_days = excluded.baseline_days,
+              relative_heat_zscore = excluded.relative_heat_zscore,
+              score_version = excluded.score_version,
               dominant_quad_class = excluded.dominant_quad_class,
               quad_class_breakdown = excluded.quad_class_breakdown,
               top_actors = excluded.top_actors,
               data_updated_at = excluded.data_updated_at
             """,
-            (day, previous_day),
+            (day,),
         )
         return cur.rowcount
 
@@ -646,21 +719,31 @@ def process_day(conn: Connection, day: date) -> dict[str, int]:
         cur.execute("delete from map_hotspots where data_date = %s", (day,))
 
     hotspots = aggregate_hotspots(events, mentions_by_event)
-    previous_day = day - timedelta(days=1)
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
             """
             select region_key, channel, heat_score
-            from map_hotspots
-            where data_date = %s
+            from (
+              select
+                region_key,
+                channel,
+                heat_score,
+                row_number() over (
+                  partition by region_key, channel
+                  order by data_date desc
+                ) as rank
+              from map_hotspots
+              where data_date < %s
+                and score_version = %s
+            ) history
+            where rank <= %s
             """,
-            (previous_day,),
+            (day, SCORE_VERSION, BASELINE_LOOKBACK_DAYS),
         )
-        previous_heat_by_key = {
-            (row["region_key"], row["channel"]): float(row["heat_score"])
-            for row in cur.fetchall()
-        }
-    apply_hotspot_trends(hotspots, previous_heat_by_key)
+        baseline_heat_by_key: dict[tuple[str, str], list[float]] = defaultdict(list)
+        for row in cur.fetchall():
+            baseline_heat_by_key[(row["region_key"], row["channel"])].append(float(row["heat_score"]))
+    apply_hotspot_trends(hotspots, baseline_heat_by_key)
     for hotspot in hotspots:
         uid = f"{hotspot.data_date.isoformat()}:{hotspot.region_key}:{hotspot.channel}"
         with conn.cursor() as cur:
@@ -671,11 +754,13 @@ def process_day(conn: Connection, day: date) -> dict[str, int]:
                   centroid_lat, centroid_long, geom, event_count, mention_count, article_count,
                   source_count, source_domain_count, heat_score, summary, dominant_quad_class,
                   quad_class_breakdown, weighted_goldstein, goldstein_min, goldstein_max,
-                  heat_delta, trend_label, top_actors, data_updated_at
+                  heat_delta, trend_label, top_actors, baseline_mean, baseline_stddev,
+                  baseline_days, relative_heat_zscore, goldstein_weight, score_version, data_updated_at
                 )
                 values (
                   %s, %s, %s, %s, %s, %s, %s, %s, ST_SetSRID(ST_MakePoint(%s, %s), 4326),
-                  %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                  %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                  %s, %s, %s, %s, %s, %s
                 )
                 returning id
                 """,
@@ -705,6 +790,12 @@ def process_day(conn: Connection, day: date) -> dict[str, int]:
                     hotspot.heat_delta,
                     hotspot.trend_label,
                     Jsonb(hotspot.top_actors),
+                    hotspot.baseline_mean,
+                    hotspot.baseline_stddev,
+                    hotspot.baseline_days,
+                    hotspot.relative_heat_zscore,
+                    hotspot.goldstein_weight,
+                    SCORE_VERSION,
                     end_at,
                 ),
             )

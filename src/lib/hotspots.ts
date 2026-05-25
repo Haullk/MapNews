@@ -45,6 +45,9 @@ export interface HotspotChannelBreakdown {
   mentionCount: number;
   sourceCount: number;
   summary: string;
+  baselineDays: number;
+  relativeHeatZScore: number | null;
+  scoreVersion: string;
 }
 
 export interface QuadClassBreakdown {
@@ -83,6 +86,11 @@ export interface MapHotspot {
   goldsteinMax: number | null;
   heatDelta: number | null;
   trendLabel: string;
+  baselineMean: number | null;
+  baselineStddev: number | null;
+  baselineDays: number;
+  relativeHeatZScore: number | null;
+  scoreVersion: string;
   topActors: TopActor[];
 }
 
@@ -229,6 +237,11 @@ export interface RegionTrendPoint {
   dominantQuadClass: number | null;
   quadClassLabel: string;
   quadClassBreakdown: QuadClassBreakdown[];
+  baselineMean: number | null;
+  baselineStddev: number | null;
+  baselineDays: number;
+  relativeHeatZScore: number | null;
+  scoreVersion: string | null;
   channel: string | null;
   channelCount: number;
   channelBreakdown: HotspotChannelBreakdown[];
@@ -240,6 +253,9 @@ export interface RegionTrend {
   days: number;
   startDate: string | null;
   endDate: string | null;
+  scoreVersion: string | null;
+  mixedScoreVersions: boolean;
+  hiddenVersionDays: number;
   points: RegionTrendPoint[];
 }
 
@@ -369,6 +385,9 @@ function channelBreakdownArray(value: unknown): HotspotChannelBreakdown[] {
         mentionCount: numberValue(record.mentionCount),
         sourceCount: numberValue(record.sourceCount),
         summary: String(record.summary ?? ""),
+        baselineDays: numberValue(record.baselineDays),
+        relativeHeatZScore: numberOrNull(record.relativeHeatZScore as number | string | null | undefined),
+        scoreVersion: String(record.scoreVersion ?? "legacy-v1"),
       };
     })
     .filter((item): item is HotspotChannelBreakdown => item !== null);
@@ -449,6 +468,11 @@ function hotspotFromRow(row: {
   goldstein_max?: number | string | null;
   heat_delta?: number | string | null;
   trend_label?: string | null;
+  baseline_mean?: number | string | null;
+  baseline_stddev?: number | string | null;
+  baseline_days?: number | string | null;
+  relative_heat_zscore?: number | string | null;
+  score_version?: string | null;
   top_actors?: unknown;
 }): MapHotspot {
   const id = Number(row.id);
@@ -487,6 +511,9 @@ function hotspotFromRow(row: {
               mentionCount,
               sourceCount,
               summary,
+              baselineDays: numberValue(row.baseline_days),
+              relativeHeatZScore: numberOrNull(row.relative_heat_zscore),
+              scoreVersion: row.score_version ?? "legacy-v1",
             },
           ],
     heatScore,
@@ -502,7 +529,12 @@ function hotspotFromRow(row: {
     goldsteinMin: numberOrNull(row.goldstein_min),
     goldsteinMax: numberOrNull(row.goldstein_max),
     heatDelta: numberOrNull(row.heat_delta),
-    trendLabel: row.trend_label || "暂无对比",
+    trendLabel: row.trend_label || "基线不足",
+    baselineMean: numberOrNull(row.baseline_mean),
+    baselineStddev: numberOrNull(row.baseline_stddev),
+    baselineDays: numberValue(row.baseline_days),
+    relativeHeatZScore: numberOrNull(row.relative_heat_zscore),
+    scoreVersion: row.score_version ?? "legacy-v1",
     topActors: topActorArray(row.top_actors),
   };
 }
@@ -786,6 +818,16 @@ export async function queryMapHotspots(filters: HotspotFilters) {
         where rank <= 8
         group by data_date, region_key
       ),
+      weighted_source as (
+        select
+          *,
+          case
+            when goldstein_weight > 0 then goldstein_weight
+            when score_version = 'legacy-v1' and weighted_goldstein is not null then greatest(event_count, 1)
+            else 0
+          end as effective_goldstein_weight
+        from filtered
+      ),
       grouped as (
         select
           (array_agg(id order by heat_score desc, event_count desc, id asc))[1] as id,
@@ -800,12 +842,23 @@ export async function queryMapHotspots(filters: HotspotFilters) {
           sum(event_count) as event_count,
           sum(mention_count) as mention_count,
           sum(source_count) as source_count,
-          sum(weighted_goldstein * greatest(event_count, 1))
-            / nullif(sum(case when weighted_goldstein is not null then greatest(event_count, 1) else 0 end), 0) as weighted_goldstein,
+          sum(effective_goldstein_weight) as goldstein_weight,
+          sum(weighted_goldstein * effective_goldstein_weight)
+            / nullif(sum(case when weighted_goldstein is not null then effective_goldstein_weight else 0 end), 0) as weighted_goldstein,
           min(goldstein_min) as goldstein_min,
           max(goldstein_max) as goldstein_max,
-          sum(heat_delta) filter (where heat_delta is not null) as heat_delta,
-          count(heat_delta) as heat_delta_count,
+          case
+            when count(*) filter (where baseline_days >= 3 and baseline_mean is not null) = count(*)
+            then sum(baseline_mean)
+            else null
+          end as baseline_mean,
+          case
+            when count(*) filter (where baseline_days >= 3 and baseline_stddev is not null) = count(*)
+            then sqrt(sum(power(greatest(baseline_stddev, 0.25), 2)))
+            else null
+          end as baseline_stddev,
+          coalesce(min(baseline_days), 0) as baseline_days,
+          (array_agg(score_version order by heat_score desc, event_count desc, id asc))[1] as score_version,
           count(*) as channel_count,
           jsonb_agg(
             jsonb_build_object(
@@ -815,22 +868,35 @@ export async function queryMapHotspots(filters: HotspotFilters) {
               'eventCount', event_count,
               'mentionCount', mention_count,
               'sourceCount', source_count,
-              'summary', summary
+              'summary', summary,
+              'baselineDays', baseline_days,
+              'relativeHeatZScore', relative_heat_zscore,
+              'scoreVersion', score_version
             )
             order by heat_score desc, event_count desc, id asc
           ) as channel_breakdown
-        from filtered
+        from weighted_source
         group by data_date, region_key
       )
       select id, primary_hotspot_id, data_date::text, region_key, region_name, channel,
              centroid_lat, centroid_long, heat_score, event_count, mention_count, source_count,
              channel_count, channel_breakdown, qs.dominant_quad_class, qs.quad_class_breakdown,
-             weighted_goldstein, goldstein_min, goldstein_max, heat_delta,
+             weighted_goldstein, goldstein_min, goldstein_max, goldstein_weight,
+             baseline_mean, baseline_stddev, baseline_days, score_version,
              case
-               when heat_delta_count = 0 then '暂无对比'
-               when heat_delta >= greatest(10, (heat_score - heat_delta) * 0.15) then '升温'
-               when heat_delta <= -greatest(10, (heat_score - heat_delta) * 0.15) then '冷却'
-               else '活跃'
+               when baseline_days < 3 or baseline_mean is null or baseline_stddev is null then null
+               else heat_score - baseline_mean
+             end as heat_delta,
+             case
+               when baseline_days < 3 or baseline_mean is null or baseline_stddev is null then null
+               else (heat_score - baseline_mean) / greatest(baseline_stddev, 0.25)
+             end as relative_heat_zscore,
+             case
+               when baseline_days < 3 or baseline_mean is null or baseline_stddev is null then '基线不足'
+               when (heat_score - baseline_mean) / greatest(baseline_stddev, 0.25) >= 2 then '显著升温'
+               when (heat_score - baseline_mean) / greatest(baseline_stddev, 0.25) >= 1 then '升温'
+               when (heat_score - baseline_mean) / greatest(baseline_stddev, 0.25) <= -1 then '冷却'
+               else '平稳'
              end as trend_label,
              coalesce(actor_summary.top_actors, '[]'::jsonb) as top_actors,
              concat(
@@ -870,7 +936,8 @@ export async function getHotspotDetail(id: number): Promise<HotspotDetail | null
                event_count, mention_count, article_count, source_count, source_domain_count,
                data_date::text, summary, dominant_quad_class, quad_class_breakdown,
                weighted_goldstein, goldstein_min, goldstein_max, heat_delta, trend_label,
-               top_actors, data_updated_at::text
+               baseline_mean, baseline_stddev, baseline_days, relative_heat_zscore,
+               score_version, top_actors, data_updated_at::text
         from map_hotspots
         where id = $1
       `,
@@ -990,7 +1057,7 @@ export async function getHotspotDetail(id: number): Promise<HotspotDetail | null
     : {
         title: row.summary,
         whatHappened: row.summary,
-        importanceReasons: ["当前态势热点主要依据事件数量、报道提及和来源数量进入地图展示。"],
+        importanceReasons: ["当前热点主要依据事件数量、报道提及和来源域名计算报道热度。"],
         sourceQuality: { ...sourceQuality(null, fallbackQuality), enhanced: false },
         uncertaintyWarnings: ["当前仅有 GDELT 结构化事件信号，正在补充来源元数据和故事组。"],
         topics: [],
@@ -1126,7 +1193,12 @@ export async function queryRegionEvents(regionKey: string, date: string, limit =
   };
 }
 
-export async function queryRegionTrend(regionKey: string, endDate?: string, days = 90): Promise<RegionTrend> {
+export async function queryRegionTrend(
+  regionKey: string,
+  endDate?: string,
+  days = 90,
+  scoreVersion?: string,
+): Promise<RegionTrend> {
   const pool = getPool();
   const dataEndDate = endDate ?? (await getDefaultDate());
   const boundedDays = Math.min(Math.max(Math.trunc(days), 7), 90);
@@ -1137,8 +1209,26 @@ export async function queryRegionTrend(regionKey: string, endDate?: string, days
       days: boundedDays,
       startDate: null,
       endDate: null,
+      scoreVersion: scoreVersion ?? null,
+      mixedScoreVersions: false,
+      hiddenVersionDays: 0,
       points: [],
     };
+  }
+
+  let targetScoreVersion = scoreVersion?.trim() || null;
+  if (!targetScoreVersion) {
+    const versionResult = await pool.query<{ score_version: string | null }>(
+      `
+        select score_version
+        from map_region_daily_metrics
+        where region_key = $1
+          and data_date = $2::date
+        limit 1
+      `,
+      [regionKey, dataEndDate],
+    );
+    targetScoreVersion = versionResult.rows[0]?.score_version ?? null;
   }
 
   const result = await pool.query<{
@@ -1158,6 +1248,12 @@ export async function queryRegionTrend(regionKey: string, endDate?: string, days
     goldstein_max: number | string | null;
     dominant_quad_class: number | string | null;
     quad_class_breakdown: unknown;
+    baseline_mean: number | string | null;
+    baseline_stddev: number | string | null;
+    baseline_days: number | string | null;
+    relative_heat_zscore: number | string | null;
+    score_version: string | null;
+    hidden_version_days: number | string | null;
     is_missing: boolean;
   }>(
     `
@@ -1169,6 +1265,24 @@ export async function queryRegionTrend(regionKey: string, endDate?: string, days
       days as (
         select generate_series(start_date, end_date, interval '1 day')::date as data_date
         from bounds
+      ),
+      raw_metrics as (
+        select *
+        from map_region_daily_metrics
+        where region_key = $1
+          and data_date between (select start_date from bounds) and (select end_date from bounds)
+      ),
+      filtered_metrics as (
+        select *
+        from raw_metrics
+        where ($4::text is null or score_version = $4::text)
+      ),
+      hidden_version_days as (
+        select count(distinct raw_metrics.data_date) as count
+        from raw_metrics
+        left join filtered_metrics
+          on filtered_metrics.data_date = raw_metrics.data_date
+        where filtered_metrics.data_date is null
       )
       select
         days.data_date::text,
@@ -1187,17 +1301,23 @@ export async function queryRegionTrend(regionKey: string, endDate?: string, days
         m.goldstein_max,
         m.dominant_quad_class,
         m.quad_class_breakdown,
-        m.region_key is null as is_missing
+        m.baseline_mean,
+        m.baseline_stddev,
+        m.baseline_days,
+        m.relative_heat_zscore,
+        m.score_version,
+        m.region_key is null as is_missing,
+        (select count from hidden_version_days) as hidden_version_days
       from days
-      left join map_region_daily_metrics m
+      left join filtered_metrics m
         on m.data_date = days.data_date
-       and m.region_key = $1
       order by days.data_date asc
     `,
-    [regionKey, dataEndDate, boundedDays],
+    [regionKey, dataEndDate, boundedDays, targetScoreVersion],
   );
 
   const regionName = result.rows.find((row) => row.region_name)?.region_name ?? regionKey;
+  const hiddenVersionDays = numberValue(result.rows[0]?.hidden_version_days);
   const points = result.rows.map((row): RegionTrendPoint => {
     const dominantQuadClass = numberOrNull(row.dominant_quad_class);
     return {
@@ -1205,7 +1325,7 @@ export async function queryRegionTrend(regionKey: string, endDate?: string, days
       isMissing: row.is_missing,
       heatScore: numberValue(row.heat_score),
       heatDelta: numberOrNull(row.heat_delta),
-      trendLabel: row.trend_label || "暂无对比",
+      trendLabel: row.trend_label || "基线不足",
       eventCount: numberValue(row.event_count),
       mentionCount: numberValue(row.mention_count),
       sourceCount: numberValue(row.source_count),
@@ -1215,6 +1335,11 @@ export async function queryRegionTrend(regionKey: string, endDate?: string, days
       dominantQuadClass,
       quadClassLabel: quadClassLabel(dominantQuadClass),
       quadClassBreakdown: quadClassBreakdownArray(row.quad_class_breakdown),
+      baselineMean: numberOrNull(row.baseline_mean),
+      baselineStddev: numberOrNull(row.baseline_stddev),
+      baselineDays: numberValue(row.baseline_days),
+      relativeHeatZScore: numberOrNull(row.relative_heat_zscore),
+      scoreVersion: row.score_version,
       channel: row.primary_channel,
       channelCount: numberValue(row.channel_count),
       channelBreakdown: channelBreakdownArray(row.channel_breakdown),
@@ -1227,6 +1352,9 @@ export async function queryRegionTrend(regionKey: string, endDate?: string, days
     days: boundedDays,
     startDate: points[0]?.dataDate ?? null,
     endDate: points.at(-1)?.dataDate ?? null,
+    scoreVersion: targetScoreVersion,
+    mixedScoreVersions: hiddenVersionDays > 0,
+    hiddenVersionDays,
     points,
   };
 }

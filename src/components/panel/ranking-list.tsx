@@ -23,9 +23,9 @@ function formatHeatScore(value: number) {
 }
 
 function trendBadgeClass(trendLabel: string) {
-  if (trendLabel === "升温") return "warming";
+  if (trendLabel === "显著升温" || trendLabel === "升温") return "warming";
   if (trendLabel === "冷却") return "cooling";
-  if (trendLabel === "活跃") return "active";
+  if (trendLabel === "平稳" || trendLabel === "活跃") return "active";
   return "neutral";
 }
 
@@ -53,7 +53,7 @@ export function RankingList({
             onChange={(event) => onSortChange(event.target.value as ResultSortMode)}
             aria-label="结果排序"
           >
-            <option value="heat">综合热度</option>
+            <option value="heat">报道热度</option>
             <option value="attitude">态势值</option>
           </select>
         </label>
@@ -85,7 +85,7 @@ export function RankingList({
                 <span className={`trend-badge ${trendBadgeClass(item.trendLabel)}`}>{item.trendLabel}</span>
                 <strong className="attitude-value">态势 {formatGoldstein(item.weightedGoldstein)}</strong>
               </span>
-              <span className="ranking-heat-text">热度 {formatHeatScore(item.heatScore)}</span>
+              <span className="ranking-heat-text">报道热度 {formatHeatScore(item.heatScore)}</span>
               <i className="heat-bar">
                 <b style={{ width: `${Math.max(8, Math.round((item.heatScore / maxHeat) * 100))}%` }} />
               </i>

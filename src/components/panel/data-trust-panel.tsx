@@ -12,13 +12,13 @@ export function DataTrustPanel({ region, selected, formatGoldstein }: DataTrustP
       <summary>数据可信度与热度说明</summary>
       <div className="trust-content">
         <p>
-          当前地图使用 GDELT Events 结构化事件数据。它适合发现报道信号和地区热点变化，但报道量不等于真实事件量，也会受媒体覆盖、语言和来源可见度影响。
+          当前地图使用 GDELT Events 结构化事件数据。它适合发现公开报道中的热点变化，但报道量不等于真实事件量，也会受媒体覆盖、语言和来源可见度影响。
         </p>
         <p>
-          Goldstein 分值表示 GDELT 对事件合作/冲突倾向的规则评分，范围通常为 -10 到 +10；负值更偏冲突，正值更偏合作。
+          报道热度用于排序和气泡大小：ln(1 + 事件数) + ln(1 + 提及数) + ln(1 + 来源域名数)。log 处理会压缩超大报道量，减少少数高覆盖地区“一边倒”占榜。
         </p>
         <p>
-          频道热点热度公式：事件数*10 + 提及数*1.5 + 来源URL数*2 + 来源域名数*3 + 文章数*0.8。地区综合热度为该地区内频道热点热度汇总。
+          态势值使用 GDELT/CAMEO 的 Goldstein 分值做加权平均，通常在 -10 到 +10 之间；负值更偏冲突，正值更偏合作。它只表示报道信号倾向，不等同于现实结论。
         </p>
         <dl className="quality-grid trust-metrics">
           <div>
@@ -46,6 +46,15 @@ export function DataTrustPanel({ region, selected, formatGoldstein }: DataTrustP
             <dd>{selected?.updatedAt ?? "尚未选择话题"}</dd>
           </div>
         </dl>
+        <div className="trust-references">
+          <strong>参考依据</strong>
+          <ul>
+            <li>GDELT Codebook：GoldsteinScale 与 QuadClass 定义。</li>
+            <li>Goldstein, 1992：合作/冲突事件强度量表。</li>
+            <li>Wang et al., 2016：GDELT 自动事件数据存在噪音与偏差。</li>
+            <li>BBVA Geopolitics Monitor：用历史基线和标准化降低报道量偏差。</li>
+          </ul>
+        </div>
       </div>
     </details>
   );

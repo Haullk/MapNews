@@ -14,6 +14,7 @@ export async function GET(request: Request) {
   const daysParam = Number(searchParams.get("days") ?? "90");
   const days = Number.isFinite(daysParam) ? daysParam : 90;
   const date = searchParams.get("date") ?? undefined;
-  const trend = await queryRegionTrend(regionKey, date, days);
+  const scoreVersion = searchParams.get("scoreVersion") ?? undefined;
+  const trend = await queryRegionTrend(regionKey, date, days, scoreVersion);
   return NextResponse.json({ trend });
 }

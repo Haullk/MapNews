@@ -205,6 +205,12 @@ alter table map_hotspots add column if not exists goldstein_max numeric;
 alter table map_hotspots add column if not exists heat_delta numeric;
 alter table map_hotspots add column if not exists trend_label text not null default '暂无对比';
 alter table map_hotspots add column if not exists top_actors jsonb not null default '[]'::jsonb;
+alter table map_hotspots add column if not exists baseline_mean numeric;
+alter table map_hotspots add column if not exists baseline_stddev numeric;
+alter table map_hotspots add column if not exists baseline_days integer not null default 0;
+alter table map_hotspots add column if not exists relative_heat_zscore numeric;
+alter table map_hotspots add column if not exists goldstein_weight numeric not null default 0;
+alter table map_hotspots add column if not exists score_version text not null default 'legacy-v1';
 
 create table if not exists map_region_daily_metrics (
   data_date date not null,
@@ -228,6 +234,12 @@ create table if not exists map_region_daily_metrics (
   weighted_goldstein numeric,
   goldstein_min numeric,
   goldstein_max numeric,
+  goldstein_weight numeric not null default 0,
+  baseline_mean numeric,
+  baseline_stddev numeric,
+  baseline_days integer not null default 0,
+  relative_heat_zscore numeric,
+  score_version text not null default 'legacy-v1',
   dominant_quad_class smallint,
   quad_class_breakdown jsonb not null default '[]'::jsonb,
   top_actors jsonb not null default '[]'::jsonb,
@@ -420,6 +432,12 @@ create index if not exists map_hotspots_geom_idx on map_hotspots using gist (geo
 create index if not exists map_region_daily_metrics_date_heat_idx on map_region_daily_metrics (data_date desc, heat_score desc);
 create index if not exists map_region_daily_metrics_region_date_idx on map_region_daily_metrics (region_key, data_date);
 create index if not exists map_region_daily_metrics_geom_idx on map_region_daily_metrics using gist (geom);
+alter table map_region_daily_metrics add column if not exists goldstein_weight numeric not null default 0;
+alter table map_region_daily_metrics add column if not exists baseline_mean numeric;
+alter table map_region_daily_metrics add column if not exists baseline_stddev numeric;
+alter table map_region_daily_metrics add column if not exists baseline_days integer not null default 0;
+alter table map_region_daily_metrics add column if not exists relative_heat_zscore numeric;
+alter table map_region_daily_metrics add column if not exists score_version text not null default 'legacy-v1';
 create index if not exists map_hotspot_sources_hotspot_rank_idx on map_hotspot_sources (hotspot_id, source_rank);
 create index if not exists map_hotspot_sources_hotspot_score_idx on map_hotspot_sources (hotspot_id, source_score desc);
 create index if not exists article_metadata_domain_idx on article_metadata (source_domain);
